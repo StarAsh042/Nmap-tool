@@ -6,7 +6,7 @@
  *   - 任务令牌与取消，消除「处理中导入新图」造成的竞态
  *   - 执行层调度：Worker 优先，不可用时降级为主线程分片
  *   - 结果导出（toBlob + ObjectURL）与历史记录快照管理
- *   - 通道信息徽标与页内原尺寸预览浮层
+ *   - 全页拖拽导入与通道信息徽标
  *   - 页内原尺寸预览浮层
  *
  * Worker 执行层在 file:// 等无法构造 Worker 的环境下自动降级为主线程分片。
@@ -62,6 +62,7 @@
         var activeJob = null;
         var worker = null;
         var workerAvailable = typeof Worker === 'function';
+        var dragDepth = 0;
         var lastFocused = null;
         var overlayTimer = null;
 
@@ -149,9 +150,7 @@
                     // 先复制再清空，允许重复选择同一个文件
                     var files = Array.prototype.slice.call(this.files || []);
                     this.value = '';
-                    if (files.length) {
-                        loadFile(files[0]);
-                    }
+                    handleFiles(files);
                 });
             }
 
@@ -196,6 +195,12 @@
                     closePreview();
                 }
             });
+
+            // 全页拦截文件拖拽，避免拖到空白处时浏览器直接打开图片
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) {
+                document.addEventListener(type, onDocumentDrag, false);
+            });
+
             window.addEventListener('beforeunload', function () {
                 historyItems = [];
             });
@@ -331,7 +336,65 @@
         /* ====================================================================
            文件导入
            ==================================================================== */
-        function loadFile(file) {
+        function onDocumentDrag(event) {
+            if (!hasFilePayload(event)) {
+                return;
+            }
+            event.preventDefault();
+
+            var busy = appState === 'loading' || appState === 'processing';
+            if (event.type === 'dragenter') {
+                dragDepth++;
+                if (el.dropZone) {
+                    el.dropZone.classList.add('drag-over');
+                }
+            } else if (event.type === 'dragleave') {
+                dragDepth = Math.max(0, dragDepth - 1);
+                if (dragDepth === 0 && el.dropZone) {
+                    el.dropZone.classList.remove('drag-over');
+                }
+            } else if (event.type === 'dragover') {
+                if (event.dataTransfer) {
+                    event.dataTransfer.dropEffect = busy ? 'none' : 'copy';
+                }
+            } else if (event.type === 'drop') {
+                dragDepth = 0;
+                if (el.dropZone) {
+                    el.dropZone.classList.remove('drag-over');
+                }
+                handleFiles(event.dataTransfer ? event.dataTransfer.files : null);
+            }
+        }
+
+        function hasFilePayload(event) {
+            var dt = event.dataTransfer;
+            if (!dt || !dt.types) {
+                return false;
+            }
+            for (var i = 0; i < dt.types.length; i++) {
+                if (dt.types[i] === 'Files') {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function handleFiles(files) {
+            if (!files || !files.length) {
+                return;
+            }
+            if (appState === 'loading' || appState === 'processing') {
+                setStatus('warning', '当前任务尚未结束，请稍候再导入新图片。');
+                return;
+            }
+            var note = '';
+            if (files.length > 1) {
+                note = '（本次共拖入 ' + files.length + ' 张图片，仅处理第一张）';
+            }
+            loadFile(files[0], note);
+        }
+
+        function loadFile(file, note) {
             cancelActiveJob();
             clearResult();
             setState('loading');
@@ -362,7 +425,7 @@
                 if (!source || !source.width || !source.height) {
                     throw new Error('图片尺寸无效');
                 }
-                applySource(source, file);
+                applySource(source, file, note);
             }).catch(function (err) {
                 failLoad('无法解码该图片（' + describeError(err) + '）。请确认文件是完整的 PNG / JPEG / WebP 等常见格式。');
             });
@@ -393,7 +456,7 @@
             });
         }
 
-        function applySource(source, file) {
+        function applySource(source, file, note) {
             var w = source.width;
             var h = source.height;
 
@@ -434,11 +497,12 @@
             }
             updateChannelBadge(el.originalChannels, sourceInfo.channels, { channel: sourceInfo.channels });
 
+            var suffix = note ? ' ' + note : '';
             setState('ready');
             if (!sourceInfo.hasAlpha) {
-                setStatus('warning', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '，RGB）。该图不含透明通道：修复后红通道将被整体置为 255，原红通道信息不可逆丢失。');
+                setStatus('warning', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '，RGB）。该图不含透明通道：修复后红通道将被整体置为 255，原红通道信息不可逆丢失。' + suffix);
             } else {
-                setStatus('success', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '，' + sourceInfo.channels + '），可以开始修复。');
+                setStatus('success', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '，' + sourceInfo.channels + '），可以开始修复。' + suffix);
             }
         }
 
