@@ -48,25 +48,25 @@ jobs:
       - name: 打包静态站点
         run: |
           set -euo pipefail
-          mkdir -p dist/FixNormalMapChannel
+          mkdir -p dist/Nmap-tool
           for f in index.html style.css algorithm.js script.js texture-decoder.js worker.js \
-                   tex_ss_5027_bs_face_n.png FixNormalMapChannel.png LICENSE README.md; do
+                   tex_ss_5027_bs_face_n.png Nmap-tool.png LICENSE README.md; do
             if [ ! -f "$f" ]; then
               echo "::error::缺少发布文件：$f"
               exit 1
             fi
-            cp "$f" dist/FixNormalMapChannel/
+            cp "$f" dist/Nmap-tool/
           done
-          cp -r vendor dist/FixNormalMapChannel/
+          cp -r vendor dist/Nmap-tool/
           # 不打包测试、CI、Rust 源码——它们不是运行时产物
-          (cd dist && zip -qr "FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip" FixNormalMapChannel)
+          (cd dist && zip -qr "Nmap-tool-v${GITHUB_REF_NAME#v}.zip" Nmap-tool)
 
       # 附件完整性：用户下载后能自己校验，不需要信任上传过程。
       - name: 生成 SHA256SUMS
         run: |
           set -euo pipefail
           cd dist
-          sha256sum FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip > SHA256SUMS
+          sha256sum Nmap-tool-v${GITHUB_REF_NAME#v}.zip > SHA256SUMS
           cat SHA256SUMS
 
       - name: 上传 Release 产物
@@ -75,9 +75,9 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$GITHUB_REF_NAME" \
-            --title "FixNormalMapChannel ${GITHUB_REF_NAME#v}" \
+            --title "Nmap-tool ${GITHUB_REF_NAME#v}" \
             --generate-notes \
-            "dist/FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip" \
+            "dist/Nmap-tool-v${GITHUB_REF_NAME#v}.zip" \
             "dist/SHA256SUMS"
 
       - name: 回读校验
@@ -85,5 +85,5 @@ jobs:
           set -euo pipefail
           gh release view "$GITHUB_REF_NAME" --json assets \
             --jq '.assets[].name' | tee /tmp/assets.txt
-          grep -q "FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip" /tmp/assets.txt || { echo "::error::产物未上传成功"; exit 1; }
+          grep -q "Nmap-tool-v${GITHUB_REF_NAME#v}.zip" /tmp/assets.txt || { echo "::error::产物未上传成功"; exit 1; }
           grep -q "SHA256SUMS" /tmp/assets.txt || { echo "::error::校验文件未上传成功"; exit 1; }

@@ -1,7 +1,7 @@
 {
-  "name": "fix-normal-map-channel",
+  "name": "nmap-tool",
   "version": "1.0.0",
-  "description": "ChannelFixer · 纯前端法线贴图通道修复工具（无运行时依赖）",
+  "description": "Nmap-tool · 纯前端法线贴图通道修复工具（无运行时依赖）",
   "private": true,
   "license": "MIT",
   "author": "StarAsh042",

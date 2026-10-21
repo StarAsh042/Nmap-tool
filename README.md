@@ -1,7 +1,7 @@
-# ChannelFixer · 法线贴图通道修复工具
+# Nmap-tool · 法线贴图通道修复工具
 
 一个轻量、纯前端的图片通道编辑器，专为法线贴图等通道重排场景设计。支持本地图片拖拽预览与一键修复，无需安装后端服务或第三方依赖。
-![alt text](FixNormalMapChannel.png)
+![alt text](Nmap-tool.png)
 
 ## 功能特性
 - 支持本地图片选择与拖拽导入，**拖到页面任意位置**均可导入，且不会触发浏览器直接打开图片
@@ -110,7 +110,7 @@ DDS 特意没有用 `image` crate 自带的实现：那个只支持 DXT1/3/5 且
 
 ## 项目结构
 ```
-FixNormalMapChannel/
+Nmap-tool/
 ├── index.html        # 页面结构与 UI
 ├── style.css         # 深色科技风主题、响应式布局与动效
 ├── algorithm.js      # 算法层：通道映射、单通道提取与通道信息判定（无 DOM 依赖）
@@ -123,7 +123,7 @@ FixNormalMapChannel/
 ├── test/             # 单元测试、等价测试、wasm 集成测试、DOM 垫片
 ├── test/fixtures/dds/  # 真实 DDS 固件（texconv 生成，含参照展开结果）
 ├── tex_ss_5027_bs_face_n.png  # 示例法线贴图
-├── FixNormalMapChannel.png    # README 配图
+├── Nmap-tool.png    # README 配图
 ├── LICENSE
 ├── CHANGELOG.md     # 版本变更记录
 └── README.md
