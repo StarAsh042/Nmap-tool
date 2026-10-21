@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # 本项目零运行时依赖，Node 内置 test runner 即可运行，无需 npm install。
       # setup-node 的 cache 仅接受 'npm' 等固定值，不接受 'none'；
@@ -27,7 +27,7 @@ jobs:
       # 测试脚本使用 `node --test "test/**/*.test.js"`，其 glob 参数支持
       # 自 Node 21 起才提供，低版本会报 "Could not find ..."。
       - name: 准备 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
