@@ -5,12 +5,11 @@
  *   - 显式状态机（idle / loading / ready / processing / done / error）
  *   - 任务令牌与取消，消除「处理中导入新图」造成的竞态
  *   - 执行层调度：Worker 优先，不可用时降级为主线程分片
- *   - 导入本地图片并绘制到原图画布
- *   - 进度与状态反馈
- *   - 导出修复结果为 PNG
+ *   - 结果导出（toBlob + ObjectURL）与历史记录快照管理
+ *   - 通道信息徽标
+ *   - 页内原尺寸预览浮层
  *
- * 本版本引入 Worker 执行层与任务取消机制；file:// 等无法构造 Worker 的
- * 环境下自动降级为主线程分片处理。
+ * Worker 执行层在 file:// 等无法构造 Worker 的环境下自动降级为主线程分片。
  *
  * 算法实现位于 algorithm.js，本文件不重复实现通道映射。
  */
@@ -19,12 +18,19 @@
 
     var Algo = window.NormalMapChannel;
 
+    /* 历史记录条数上限，超出后释放最旧的快照 */
+    var HISTORY_LIMIT = 12;
+
     /* 主线程分片参数 */
     var MAIN_BLOCK_ROWS = 16;
     var MAIN_BUDGET_MS = 10;
 
     /* 进度文案的最小更新间隔，避免高频刷新 */
     var LABEL_THROTTLE_MS = 120;
+
+    /* 静态图标（常量字符串，不含任何用户数据） */
+    var ICON_DOWNLOAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>';
+    var ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>';
 
     var STATE_META = {
         idle: { level: 'idle', text: '等待导入' },
@@ -35,7 +41,6 @@
         error: { level: 'error', text: '需要处理' }
     };
 
-    /* ---------------- 入口 ---------------- */
     document.addEventListener('DOMContentLoaded', init);
 
     function init() {
@@ -46,8 +51,10 @@
 
         /* ---------------- 运行时状态 ---------------- */
         var appState = 'idle';
-        var sourceInfo = null;      // { name, width, height }
+        var sourceInfo = null;      // { name, width, height, hasAlpha, channels }
         var lastResult = null;      // { blob, name, width, height }
+        var historyItems = [];      // 不可变快照数组
+        var historySeq = 0;
         var jobSeq = 0;
         var activeJob = null;
         var worker = null;
@@ -77,7 +84,7 @@
             resetProgress();
             setWaiting(false);
             setLabel('等待处理');
-            hideProcessed();
+            renderHistory();
         }
 
         /* ====================================================================
@@ -98,6 +105,12 @@
                 fixedEmpty: byId('fixedEmpty'),
                 originalRes: byId('originalRes'),
                 fixedRes: byId('fixedRes'),
+                originalChannels: byId('originalChannels'),
+                fixedChannels: byId('fixedChannels'),
+
+                historyList: byId('historyList'),
+                historyEmpty: byId('historyEmpty'),
+                clearHistoryBtn: byId('clearHistoryBtn'),
 
                 progressTrack: byId('progressTrack'),
                 progressFill: byId('progressFill'),
@@ -105,7 +118,8 @@
                 statusMessage: byId('statusMessage'),
 
                 statusPill: byId('statusPill'),
-                statusPillText: byId('statusPillText')
+                statusPillText: byId('statusPillText'),
+
             };
         }
 
@@ -134,6 +148,15 @@
             if (el.downloadBtn) {
                 el.downloadBtn.addEventListener('click', handleDownload);
             }
+            if (el.clearHistoryBtn) {
+                el.clearHistoryBtn.addEventListener('click', clearHistory);
+            }
+            if (el.historyList) {
+                el.historyList.addEventListener('click', onHistoryClick);
+            }
+            window.addEventListener('beforeunload', function () {
+                historyItems = [];
+            });
         }
 
         /* ====================================================================
@@ -162,8 +185,14 @@
             if (el.fileInput) {
                 el.fileInput.disabled = busy;
             }
+            if (el.clearHistoryBtn) {
+                el.clearHistoryBtn.disabled = historyItems.length === 0;
+            }
             if (el.dropZone) {
                 el.dropZone.classList.toggle('is-busy', busy);
+            }
+            if (el.historyEmpty) {
+                el.historyEmpty.hidden = historyItems.length > 0;
             }
         }
 
@@ -215,6 +244,26 @@
             }
         }
 
+        function updateChannelBadge(node, text, options) {
+            if (!node) {
+                return;
+            }
+            if (!text) {
+                node.textContent = '';
+                node.classList.remove('is-visible', 'is-pending');
+                node.removeAttribute('data-channel');
+                return;
+            }
+            node.textContent = text;
+            node.classList.add('is-visible');
+            node.classList.toggle('is-pending', Boolean(options && options.pending));
+            if (options && options.channel) {
+                node.setAttribute('data-channel', options.channel);
+            } else {
+                node.removeAttribute('data-channel');
+            }
+        }
+
         function showCanvas(canvas, visible) {
             canvas.classList.toggle('is-visible', visible);
         }
@@ -236,7 +285,6 @@
             if (el.dropZone) {
                 el.dropZone.classList.remove('has-error');
             }
-
             if (el.fileName) {
                 el.fileName.textContent = (file.name || '未命名文件') + ' · ' + formatBytes(file.size);
             }
@@ -246,16 +294,21 @@
             if (el.fixedRes) {
                 el.fixedRes.textContent = '';
             }
+            updateChannelBadge(el.originalChannels, '', null);
+            updateChannelBadge(el.fixedChannels, '', null);
             showCanvas(el.originalCanvas, false);
             if (el.originalEmpty) {
                 el.originalEmpty.hidden = false;
             }
-            setLabel('等待处理');
             resetProgress();
             setWaiting(false);
+            setLabel('等待处理');
             setStatus('busy', '正在读取 ' + (file.name || '图片') + ' …');
 
             decodeImage(file).then(function (source) {
+                if (!source || !source.width || !source.height) {
+                    throw new Error('图片尺寸无效');
+                }
                 applySource(source, file);
             }).catch(function (err) {
                 failLoad('无法解码该图片（' + describeError(err) + '）。请确认文件是完整的 PNG / JPEG / WebP 等常见格式。');
@@ -291,6 +344,14 @@
             var w = source.width;
             var h = source.height;
 
+            sourceInfo = {
+                name: file.name || 'image',
+                width: w,
+                height: h,
+                hasAlpha: false,
+                channels: 'RGB'
+            };
+
             try {
                 el.originalCanvas.width = w;
                 el.originalCanvas.height = h;
@@ -301,12 +362,6 @@
                 return;
             }
 
-            sourceInfo = {
-                name: file.name || 'image',
-                width: w,
-                height: h
-            };
-
             if (el.originalRes) {
                 el.originalRes.textContent = formatSize(w, h);
             }
@@ -314,13 +369,30 @@
             if (el.originalEmpty) {
                 el.originalEmpty.hidden = true;
             }
+
+            try {
+                var pixels = ctxOriginal.getImageData(0, 0, w, h).data;
+                var info = Algo.inspectChannels(pixels, w, h);
+                sourceInfo.hasAlpha = info.hasAlpha;
+                sourceInfo.channels = info.channels;
+            } catch (err) {
+                // 预读失败不阻断流程：真正处理时会再次尝试并给出明确错误
+                sourceInfo.channels = 'RGB';
+            }
+            updateChannelBadge(el.originalChannels, sourceInfo.channels, { channel: sourceInfo.channels });
+
             setState('ready');
-            setStatus('success', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '），可以开始修复。');
+            if (!sourceInfo.hasAlpha) {
+                setStatus('warning', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '，RGB）。该图不含透明通道：修复后红通道将被整体置为 255，原红通道信息不可逆丢失。');
+            } else {
+                setStatus('success', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '，' + sourceInfo.channels + '），可以开始修复。');
+            }
         }
 
         function failLoad(message) {
             sourceInfo = null;
             lastResult = null;
+            setState('error');
             if (el.dropZone) {
                 el.dropZone.classList.add('has-error');
             }
@@ -328,10 +400,10 @@
             if (el.originalEmpty) {
                 el.originalEmpty.hidden = false;
             }
+            updateChannelBadge(el.originalChannels, '', null);
             resetProgress();
             setWaiting(false);
             setLabel('等待处理');
-            setState('error');
             setStatus('error', message);
         }
 
@@ -353,7 +425,6 @@
                 setStatus('error', '原图尺寸无效，请重新导入。');
                 return;
             }
-
             cancelActiveJob();
             clearResult();
 
@@ -370,12 +441,13 @@
             };
             activeJob = job;
 
-            hideProcessed();
             setState('processing');
             resetProgress();
             setWaiting(true);
             setLabel('准备中…');
             setStatus('busy', '正在修复通道…（' + formatSize(w, h) + '）');
+            hideProcessed();
+            updateChannelBadge(el.fixedChannels, '正在生成…', { pending: true });
 
             job.startedAt = now();
             runJob(job);
@@ -499,6 +571,7 @@
 
             setWaiting(false);
             setProgress(100);
+            setLabel('耗时 ' + elapsed + ' ms');
             showCanvas(el.processedCanvas, true);
             if (el.fixedEmpty) {
                 el.fixedEmpty.hidden = true;
@@ -506,8 +579,8 @@
             if (el.fixedRes) {
                 el.fixedRes.textContent = formatSize(job.width, job.height);
             }
+            updateChannelBadge(el.fixedChannels, 'RGB', { channel: 'RGB' });
             setState('done');
-            setLabel('耗时 ' + elapsed + ' ms');
             setStatus('success', '通道修复完成：' + formatSize(job.width, job.height) + '，耗时 ' + elapsed + ' ms。可下载结果或导入新图片。');
 
             encodeResult(job.width, job.height);
@@ -520,6 +593,7 @@
             job.cancelled = true;
             setWaiting(false);
             setLabel('处理失败');
+            updateChannelBadge(el.fixedChannels, '', null);
             hideProcessed();
             setState('error');
             setStatus('error', message + ' 原图仍保留，可重试或更换图片。');
@@ -642,7 +716,7 @@
         }
 
         /* ====================================================================
-           结果导出
+           结果导出与历史记录
            ==================================================================== */
         function clearResult() {
             lastResult = null;
@@ -650,17 +724,23 @@
             if (el.fixedRes) {
                 el.fixedRes.textContent = '';
             }
+            updateChannelBadge(el.fixedChannels, '', null);
             syncControls();
         }
 
         function encodeResult(w, h) {
             if (typeof el.processedCanvas.toBlob !== 'function') {
+                setStatus('warning', '当前环境不支持异步导出，下载时可能需要短暂等待。');
                 return;
             }
             el.processedCanvas.toBlob(function (blob) {
-                if (blob) {
-                    lastResult = { blob: blob, name: outputName(), width: w, height: h };
+                if (!blob) {
+                    setStatus('warning', '结果编码失败，下载时会重新尝试编码。');
+                    return;
                 }
+                var name = outputName();
+                lastResult = { blob: blob, name: name, width: w, height: h };
+                addHistoryEntry(blob, name, w, h);
             }, 'image/png');
         }
 
@@ -669,6 +749,7 @@
                 return;
             }
             if (!lastResult || !lastResult.blob) {
+                setStatus('warning', '结果尚未编码完成，请稍候重试。');
                 return;
             }
             saveBlob(lastResult.blob, lastResult.name);
@@ -697,6 +778,146 @@
             setTimeout(function () {
                 URL.revokeObjectURL(url);
             }, 10000);
+        }
+
+        function addHistoryEntry(blob, name, width, height) {
+            var entry = {
+                id: 'entry-' + (++historySeq),
+                name: name,
+                width: width,
+                height: height,
+                blob: blob,
+                url: URL.createObjectURL(blob),
+                createdAt: Date.now()
+            };
+            historyItems.unshift(entry);
+            while (historyItems.length > HISTORY_LIMIT) {
+                releaseEntry(historyItems.pop());
+            }
+            renderHistory();
+        }
+
+        function releaseEntry(entry) {
+            if (!entry || !entry.url) {
+                return;
+            }
+            try {
+                URL.revokeObjectURL(entry.url);
+            } catch (err) {
+                /* 忽略 */
+            }
+            entry.url = '';
+        }
+
+        function findEntry(id) {
+            for (var i = 0; i < historyItems.length; i++) {
+                if (historyItems[i].id === id) {
+                    return historyItems[i];
+                }
+            }
+            return null;
+        }
+
+        function renderHistory() {
+            if (!el.historyList) {
+                return;
+            }
+            el.historyList.textContent = '';
+
+            historyItems.forEach(function (entry) {
+                var item = document.createElement('div');
+                item.className = 'history-item';
+                item.dataset.id = entry.id;
+
+                var thumb = document.createElement('img');
+                thumb.className = 'history-thumb';
+                thumb.src = entry.url;
+                thumb.alt = entry.name + ' 的修复结果缩略图';
+                thumb.loading = 'lazy';
+                thumb.decoding = 'async';
+
+                var meta = document.createElement('div');
+                meta.className = 'history-meta';
+                var name = document.createElement('div');
+                name.className = 'history-name';
+                name.textContent = entry.name;
+                name.title = entry.name;
+                var sub = document.createElement('div');
+                sub.className = 'history-sub';
+                sub.textContent = formatSize(entry.width, entry.height) + ' · ' + formatTime(entry.createdAt);
+                meta.appendChild(name);
+                meta.appendChild(sub);
+
+                var actions = document.createElement('div');
+                actions.className = 'history-actions';
+                actions.appendChild(makeIconButton('icon-btn', '下载 ' + entry.name, ICON_DOWNLOAD, 'download'));
+                actions.appendChild(makeIconButton('icon-btn is-danger', '移除 ' + entry.name, ICON_TRASH, 'remove'));
+
+                item.appendChild(thumb);
+                item.appendChild(meta);
+                item.appendChild(actions);
+                el.historyList.appendChild(item);
+            });
+
+            syncControls();
+        }
+
+        function makeIconButton(className, label, svg, action) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = className;
+            btn.setAttribute('aria-label', label);
+            btn.title = label;
+            btn.dataset.action = action;
+            btn.innerHTML = svg;
+            return btn;
+        }
+
+        function onHistoryClick(event) {
+            var btn = event.target && event.target.closest ? event.target.closest('button[data-action]') : null;
+            if (!btn) {
+                return;
+            }
+            var item = btn.closest('.history-item');
+            if (!item) {
+                return;
+            }
+            var id = item.dataset.id;
+            var action = btn.dataset.action;
+
+            if (action === 'remove') {
+                removeHistoryEntry(id);
+            } else if (action === 'download') {
+                downloadHistoryEntry(id);
+            }
+        }
+
+        function downloadHistoryEntry(id) {
+            var entry = findEntry(id);
+            if (!entry) {
+                return;
+            }
+            saveBlob(entry.blob, entry.name);
+            setStatus('success', '已开始下载 ' + entry.name);
+        }
+
+        function removeHistoryEntry(id) {
+            for (var i = 0; i < historyItems.length; i++) {
+                if (historyItems[i].id === id) {
+                    releaseEntry(historyItems[i]);
+                    historyItems.splice(i, 1);
+                    renderHistory();
+                    setStatus('info', '已移除 1 条历史记录。');
+                    return;
+                }
+            }
+        }
+
+        function clearHistory() {
+            historyItems.forEach(releaseEntry);
+            historyItems = [];
+            renderHistory();
+            setStatus('info', '历史记录已清空。');
         }
 
         /* ====================================================================
@@ -730,6 +951,14 @@
                 return (bytes / 1024).toFixed(1) + ' KB';
             }
             return (bytes / 1048576).toFixed(1) + ' MB';
+        }
+
+        function formatTime(timestamp) {
+            try {
+                return new Date(timestamp).toLocaleTimeString();
+            } catch (err) {
+                return '';
+            }
         }
     }
 })();
