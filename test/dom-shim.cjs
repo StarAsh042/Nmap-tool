@@ -878,6 +878,51 @@ async function importImage(doc, width, height, fill) {
 }
 
 /**
+ * 模拟导入一张 TGA：用假的 NormalMapTga 替身直接返回裸像素。
+ *
+ * 走的是 script.js 真实的 decodeWithWasm → applySource 链路，
+ * 与 importImage 的区别只在解码来源——这条路径拿得到精确像素，
+ * 不需要经过画布往返，因此可以断言「处理阶段不回读画布」。
+ *
+ * @param {object} doc loadScript 返回的 document
+ * @param {number} width
+ * @param {number} height
+ * @param {[number,number,number,number]} fill RGBA
+ */
+async function importTga(doc, width, height, fill) {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < data.length; i += 4) {
+        data[i] = fill[0];
+        data[i + 1] = fill[1];
+        data[i + 2] = fill[2];
+        data[i + 3] = fill[3];
+    }
+
+    const fakeFile = {
+        name: 'test.tga',
+        size: data.length,
+        arrayBuffer: async () => data.buffer,
+    };
+
+    const win = global.window;
+    const prev = win.NormalMapTga;
+    win.NormalMapTga = {
+        isSupported: () => true,
+        decode: async () => ({ width, height, data }),
+    };
+
+    try {
+        const input = doc.getElementById('fileInput');
+        input.files = [fakeFile];
+        input.value = 'C:\\fakepath\\test.tga';
+        input.__emit('change');
+        await flushFrames(12);
+    } finally {
+        win.NormalMapTga = prev;
+    }
+}
+
+/**
  * 触发「开始修复」并等待主线程分片处理完成。
  * 不提供 Worker，因此走的是主线程降级分支——这正是需要覆盖的路径。
  */
@@ -892,6 +937,7 @@ module.exports = {
     loadScript,
     flushFrames,
     importImage,
+    importTga,
     runFix,
     ShimElement,
     ShimCanvas,

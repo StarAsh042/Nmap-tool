@@ -488,11 +488,11 @@
          * applySource 会按类型分派。
          */
         function decodeWithWasm(file) {
-            if (!self.NormalMapTga || !self.NormalMapTga.isSupported()) {
+            if (!window.NormalMapTga || !window.NormalMapTga.isSupported()) {
                 return Promise.reject(new Error('当前浏览器不支持 WebAssembly'));
             }
             setStatus('busy', '正在解码 ' + (file.name || '文件') + ' …');
-            return self.NormalMapTga.decode(file, Algo.MAX_PIXELS).then(function (decoded) {
+            return window.NormalMapTga.decode(file, Algo.MAX_PIXELS).then(function (decoded) {
                 return new ImageData(decoded.data, decoded.width, decoded.height);
             });
         }
@@ -528,12 +528,16 @@
             var h = source.height;
             overLimit = w * h > Algo.MAX_PIXELS;
 
+            // wasm 解码出来的裸像素，是这份图唯一的精确副本（见下方说明）
+            var rawPixels = isRawImageData(source) ? source.data : null;
+
             sourceInfo = {
                 name: file.name || 'image',
                 width: w,
                 height: h,
                 hasAlpha: false,
-                channels: 'RGB'
+                channels: 'RGB',
+                pixels: null
             };
 
             // 超限时不再分配画布内存（避免在已经很大的图上再叠一份缓冲）
@@ -573,10 +577,17 @@
             }
 
             try {
-                var pixels = ctxOriginal.getImageData(0, 0, w, h).data;
+                var pixels = rawPixels || ctxOriginal.getImageData(0, 0, w, h).data;
                 var info = Algo.inspectChannels(pixels, w, h);
                 sourceInfo.hasAlpha = info.hasAlpha;
                 sourceInfo.channels = info.channels;
+
+                // 只有真的带透明通道才保留原始像素。
+                // alpha=255 时画布往返是无损的，没必要为此多占一份整图内存
+                // （8K 图就是 128MB）。
+                if (rawPixels && info.hasAlpha) {
+                    sourceInfo.pixels = rawPixels;
+                }
             } catch (err) {
                 // 预读失败不阻断流程：真正处理时会再次尝试并给出明确错误
                 sourceInfo.channels = 'RGB';
@@ -681,6 +692,26 @@
             runJob(job);
         }
 
+        /**
+         * 取用于处理的源像素。
+         *
+         * 优先使用解码阶段保留下来的原始像素。原因：画布在存储半透明像素时会
+         * 先预乘 alpha、读出时再反预乘，这个往返是有损的——实测 alpha=1 时
+         * 通道值 17 会被读成 0，偏差达 17；alpha=200 时 30 会变成 31。
+         * 本工具的核心操作正是把 alpha 搬进红通道，这个损失会直接进入结果。
+         *
+         * wasm 解码的 TGA 没有这一步，用原始数据可以完全避开。
+         * 浏览器原生解码的格式（PNG / JPEG 等）拿不到原始像素：实测 WebCodecs
+         * 的 ImageDecoder 与画布给出完全相同的结果，说明损失发生在浏览器的
+         * 解码管线里，本应用无法绕过。这类格式仍然从画布读取。
+         */
+        function readSourcePixels(width, height) {
+            if (sourceInfo && sourceInfo.pixels && sourceInfo.pixels.length === width * height * 4) {
+                return sourceInfo.pixels;
+            }
+            return ctxOriginal.getImageData(0, 0, width, height).data;
+        }
+
         function runJob(job) {
             var wk = getWorker();
             if (!wk) {
@@ -688,13 +719,19 @@
                 return;
             }
 
-            var imageData;
+            var srcPixels;
             try {
-                imageData = ctxOriginal.getImageData(0, 0, job.width, job.height);
+                srcPixels = readSourcePixels(job.width, job.height);
             } catch (err) {
                 failJob(job, '无法读取原图像素：' + describeError(err) + '。图片可能超过浏览器的画布上限。');
                 return;
             }
+
+            // 缓存的原始像素不能直接 transfer——那会把它的 buffer 置为 detached，
+            // 之后再点一次「开始修复」就读不出来了。传一份副本。
+            var buffer = (sourceInfo && sourceInfo.pixels === srcPixels)
+                ? srcPixels.slice().buffer
+                : srcPixels.buffer;
 
             job.mode = 'worker';
             try {
@@ -703,8 +740,8 @@
                     jobId: job.id,
                     width: job.width,
                     height: job.height,
-                    buffer: imageData.data.buffer
-                }, [imageData.data.buffer]);
+                    buffer: buffer
+                }, [buffer]);
             } catch (err) {
                 // 传输失败（例如实现不支持 Transferable）：销毁后台线程并降级
                 workerAvailable = false;
@@ -727,7 +764,7 @@
             try {
                 src = (imageData && imageData.data && imageData.data.length)
                     ? imageData.data
-                    : ctxOriginal.getImageData(0, 0, w, h).data;
+                    : readSourcePixels(w, h);
                 dstData = ctxProcessed.createImageData(w, h);
             } catch (err) {
                 failJob(job, '无法创建像素缓冲区：' + describeError(err));

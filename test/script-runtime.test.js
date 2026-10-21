@@ -10,7 +10,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { loadScript, flushFrames, importImage, runFix } = require('./dom-shim.cjs');
+const { loadScript, flushFrames, importImage, importTga, runFix } = require('./dom-shim.cjs');
 
 /* ======================================================================
    测试辅助
@@ -147,6 +147,73 @@ test('修复:主线程降级路径产出符合映射规则的结果', async () =
 
     app.cleanup();
 });
+
+test('修复:wasm 解码的 TGA 使用精确像素，处理阶段不回读画布', async () => {
+    const app = await mount({ width: 0, height: 0 });
+    await importTga(app.doc, 4, 4, [30, 20, 10, 200]);
+
+    const ctx = app.ctx('originalCanvas');
+    const before = ctx.calls.getImageData;
+
+    await runFix(app.doc);
+
+    // 关键契约：处理阶段不能再回读画布。
+    // 画布存半透明像素时会先预乘 alpha、读出时再反预乘，这个往返有损：
+    // 实测 alpha=200 时 30 会读成 31，alpha=1 时 17 会被读成 0。
+    // 本工具把 alpha 搬进红通道，这点损失会直接进入结果。
+    assert.equal(ctx.calls.getImageData, before,
+        '带 alpha 的 TGA 处理时不应回读画布');
+
+    const px = app.pixels('processedCanvas').data;
+    assert.deepEqual(
+        [px[0], px[1], px[2], px[3]],
+        [200, 235, 30, 255],
+        'B 应精确取原 R=30；若变成 31 说明又走了画布往返',
+    );
+
+    app.cleanup();
+});
+
+test('修复:重复处理同一张 TGA 结果一致', async () => {
+    const app = await mount({ width: 0, height: 0 });
+    await importTga(app.doc, 4, 4, [30, 20, 10, 200]);
+
+    await runFix(app.doc);
+    const first = Array.from(app.pixels('processedCanvas').data.slice(0, 4));
+
+    await runFix(app.doc);
+    const second = Array.from(app.pixels('processedCanvas').data.slice(0, 4));
+
+    assert.deepEqual(second, first, '重复处理应得到相同结果');
+    assert.deepEqual(second, [200, 235, 30, 255]);
+
+    // 注意：垫片里没有 Worker，这里走的是主线程分支。
+    // 「Worker 分支不能直接 transfer 缓存像素」那条约束由浏览器端到端验证覆盖
+    // （实测连点两次结果一致），CI 不覆盖，改动 runJob 的搬运逻辑时需手动复验。
+    app.cleanup();
+});
+
+test('修复:不含 alpha 的 TGA 不保留整图副本，仍回读画布', async () => {
+    // alpha=255 时画布往返是无损的，没必要为此多占一份整图内存
+    // （8K 图就是 128MB）。这里断言该优化生效。
+    const app = await mount({ width: 0, height: 0 });
+    await importTga(app.doc, 4, 4, [30, 20, 10, 255]);
+
+    const ctx = app.ctx('originalCanvas');
+    const before = ctx.calls.getImageData;
+
+    await runFix(app.doc);
+
+    assert.ok(ctx.calls.getImageData > before,
+        'alpha=255 时应回读画布（无损），说明没有保留多余副本');
+
+    const px = app.pixels('processedCanvas').data;
+    assert.deepEqual([px[0], px[1], px[2], px[3]], [255, 235, 30, 255]);
+
+    app.cleanup();
+});
+
+
 
 test('修复:进度条到达 100% 并给出耗时', async () => {
     const app = await mount({ width: 16, height: 16 });
