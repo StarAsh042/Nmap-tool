@@ -6,10 +6,7 @@
  *   - 任务令牌与取消，消除「处理中导入新图」造成的竞态
  *   - 执行层调度：Worker 优先，不可用时降级为主线程分片
  *   - 结果导出（toBlob + ObjectURL）与历史记录快照管理
- *   - 全页拖拽导入与通道信息徽标
- *   - 页内原尺寸预览浮层
- *
- * Worker 执行层在 file:// 等无法构造 Worker 的环境下自动降级为主线程分片。
+ *   - 统一可见反馈出口 setStatus，取代原先只会写 console 的 log()
  *
  * 算法实现位于 algorithm.js，本文件不重复实现通道映射。
  */
@@ -17,6 +14,9 @@
     'use strict';
 
     var Algo = window.NormalMapChannel;
+
+    /* 单文件体积上限（150MB）：超过它时解码本身就可能拖垮标签页 */
+    var MAX_FILE_BYTES = 157286400;
 
     /* 历史记录条数上限，超出后释放最旧的快照 */
     var HISTORY_LIMIT = 12;
@@ -55,6 +55,7 @@
         /* ---------------- 运行时状态 ---------------- */
         var appState = 'idle';
         var sourceInfo = null;      // { name, width, height, hasAlpha, channels }
+        var overLimit = false;
         var lastResult = null;      // { blob, name, width, height }
         var historyItems = [];      // 不可变快照数组
         var historySeq = 0;
@@ -224,7 +225,7 @@
         function syncControls() {
             var busy = appState === 'loading' || appState === 'processing';
             if (el.fixBtn) {
-                el.fixBtn.disabled = busy || !sourceInfo;
+                el.fixBtn.disabled = busy || !sourceInfo || overLimit;
             }
             if (el.downloadBtn) {
                 el.downloadBtn.disabled = appState !== 'done';
@@ -421,6 +422,11 @@
             setLabel('等待处理');
             setStatus('busy', '正在读取 ' + (file.name || '图片') + ' …');
 
+            if (file.size > MAX_FILE_BYTES) {
+                failLoad('文件体积为 ' + formatBytes(file.size) + '，超过 ' + formatBytes(MAX_FILE_BYTES) + ' 上限。请先压缩或缩小图片。');
+                return;
+            }
+
             decodeImage(file).then(function (source) {
                 if (!source || !source.width || !source.height) {
                     throw new Error('图片尺寸无效');
@@ -459,6 +465,7 @@
         function applySource(source, file, note) {
             var w = source.width;
             var h = source.height;
+            overLimit = w * h > Algo.MAX_PIXELS;
 
             sourceInfo = {
                 name: file.name || 'image',
@@ -467,6 +474,16 @@
                 hasAlpha: false,
                 channels: 'RGB'
             };
+
+            // 超限时不再分配画布内存（避免在已经很大的图上再叠一份缓冲）
+            if (overLimit) {
+                if (el.originalRes) {
+                    el.originalRes.textContent = formatSize(w, h);
+                }
+                setState('error');
+                setStatus('error', '图片像素总量为 ' + formatSize(w, h) + '，超过可处理上限（约 3355 万像素）。请先缩小图片后再试。');
+                return;
+            }
 
             try {
                 el.originalCanvas.width = w;
@@ -508,6 +525,7 @@
 
         function failLoad(message) {
             sourceInfo = null;
+            overLimit = false;
             lastResult = null;
             setState('error');
             if (el.dropZone) {
@@ -540,6 +558,12 @@
             var h = el.originalCanvas.height;
             if (!w || !h) {
                 setStatus('error', '原图尺寸无效，请重新导入。');
+                return;
+            }
+            if (w * h > Algo.MAX_PIXELS) {
+                overLimit = true;
+                setState('error');
+                setStatus('error', '图片像素总量超出可处理上限，请先缩小图片。');
                 return;
             }
             cancelActiveJob();
