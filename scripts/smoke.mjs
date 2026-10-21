@@ -180,10 +180,10 @@ try {
 }
 
 // ---- 5. wasm 产物存在性 ----
-// 这两个文件不由 HTML 直接引用，而是 tga-decoder.js 在运行时按路径加载，
+// 这两个文件不由 HTML 直接引用，而是 texture-decoder.js 在运行时按路径加载，
 // 上面的引用检查覆盖不到。少了它们页面照常打开，只有导入 TGA 时才失败，
 // 属于最容易被忽略的一类断链，所以单独校验。
-const WASM_ASSETS = ['vendor/tga-decoder.wasm', 'vendor/tga-decoder-b64.js'];
+const WASM_ASSETS = ['vendor/texture-decoder.wasm', 'vendor/texture-decoder-b64.js'];
 for (const rel of WASM_ASSETS) {
   try {
     const buf = await readFile(join(ROOT, rel));

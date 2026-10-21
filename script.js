@@ -33,11 +33,11 @@
     var LABEL_THROTTLE_MS = 120;
 
     /* 浏览器无法解码、但用户常会尝试拖动进来的扩展名。
-       tga 已通过 wasm 解码器支持，不在此列。 */
-    var UNSUPPORTED_EXTENSIONS = ['exr', 'dds', 'hdr', 'psd', 'tif', 'tiff'];
+       tga / dds 已通过 wasm 解码器支持，不在此列。 */
+    var UNSUPPORTED_EXTENSIONS = ['exr', 'hdr', 'psd', 'tif', 'tiff'];
 
-    /* 需要走 wasm 解码器的扩展名 */
-    var WASM_EXTENSIONS = ['tga'];
+    /* 需要走 wasm 解码器的扩展名，同时也是传给解码器的格式标识 */
+    var WASM_EXTENSIONS = ['tga', 'dds'];
 
     /* 浮层过渡时长，与 CSS 中 --dur 保持一致 */
     var OVERLAY_TRANSITION_MS = 200;
@@ -469,8 +469,9 @@
         }
 
         function decodeImage(file) {
-            if (WASM_EXTENSIONS.indexOf(extensionOf(file.name)) >= 0) {
-                return decodeWithWasm(file);
+            var ext = extensionOf(file.name);
+            if (WASM_EXTENSIONS.indexOf(ext) >= 0) {
+                return decodeWithWasm(file, ext);
             }
             if (typeof createImageBitmap === 'function') {
                 return createImageBitmap(file).catch(function () {
@@ -481,18 +482,21 @@
         }
 
         /**
-         * 用 wasm 解码浏览器不支持的格式（当前只有 TGA）。
+         * 用 wasm 解码浏览器不支持的格式（当前是 TGA 与 DDS）。
          *
          * 返回的 ImageData 与 ImageBitmap 不同：它不能 drawImage，但可以直接
          * putImageData，省掉一次「先合成到画布再读回来」的搬运。
          * applySource 会按类型分派。
+         *
+         * @param {File} file
+         * @param {string} format 'tga' 或 'dds'，决定 wasm 调用哪个导出函数
          */
-        function decodeWithWasm(file) {
-            if (!window.NormalMapTga || !window.NormalMapTga.isSupported()) {
+        function decodeWithWasm(file, format) {
+            if (!window.NormalMapDecoder || !window.NormalMapDecoder.isSupported()) {
                 return Promise.reject(new Error('当前浏览器不支持 WebAssembly'));
             }
             setStatus('busy', '正在解码 ' + (file.name || '文件') + ' …');
-            return window.NormalMapTga.decode(file, Algo.MAX_PIXELS).then(function (decoded) {
+            return window.NormalMapDecoder.decode(file, Algo.MAX_PIXELS, format).then(function (decoded) {
                 return new ImageData(decoded.data, decoded.width, decoded.height);
             });
         }

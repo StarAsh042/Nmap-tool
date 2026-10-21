@@ -10,7 +10,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { loadScript, flushFrames, importImage, importTga, runFix } = require('./dom-shim.cjs');
+const { loadScript, flushFrames, importImage, importTga, importWasmImage, runFix } = require('./dom-shim.cjs');
 
 /* ======================================================================
    测试辅助
@@ -214,6 +214,35 @@ test('修复:不含 alpha 的 TGA 不保留整图副本，仍回读画布', asyn
 });
 
 
+
+test('修复:DDS 文件把 dds 格式传给解码器', async () => {
+    const app = await mount({ width: 0, height: 0 });
+    const calls = await importWasmImage(app.doc, {
+        name: 'test.dds', width: 4, height: 4, fill: [30, 20, 10, 200],
+    });
+
+    // 把 .dds 当 tga 解也会报错，但错误信息不会指出是分流的错。
+    // 这里直接断言传给解码器的格式，定位问题更快。
+    assert.equal(calls.length, 1, '应调用解码器一次');
+    assert.equal(calls[0].format, 'dds', '扩展名 .dds 应把 dds 传给解码器');
+
+    await runFix(app.doc);
+    const px = app.pixels('processedCanvas').data;
+    assert.deepEqual([px[0], px[1], px[2], px[3]], [200, 235, 30, 255],
+        'DDS 解码结果应与 TGA 走同一条通道映射');
+
+    app.cleanup();
+});
+
+test('修复:TGA 文件仍把 tga 格式传给解码器', async () => {
+    const app = await mount({ width: 0, height: 0 });
+    const calls = await importWasmImage(app.doc, {
+        name: 'test.tga', width: 4, height: 4, fill: [30, 20, 10, 200],
+    });
+
+    assert.equal(calls[0].format, 'tga', '扩展名 .tga 不应被误判成其他格式');
+    app.cleanup();
+});
 
 test('修复:进度条到达 100% 并给出耗时', async () => {
     const app = await mount({ width: 16, height: 16 });

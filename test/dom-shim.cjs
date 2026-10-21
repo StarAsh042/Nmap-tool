@@ -878,18 +878,20 @@ async function importImage(doc, width, height, fill) {
 }
 
 /**
- * 模拟导入一张 TGA：用假的 NormalMapTga 替身直接返回裸像素。
+ * 模拟导入一张需要 wasm 解码的图（TGA / DDS）。
  *
- * 走的是 script.js 真实的 decodeWithWasm → applySource 链路，
- * 与 importImage 的区别只在解码来源——这条路径拿得到精确像素，
- * 不需要经过画布往返，因此可以断言「处理阶段不回读画布」。
+ * 用假的 NormalMapDecoder 替身直接返回裸像素，走的是 script.js 真实的
+ * decodeWithWasm → applySource 链路。与 importImage 的区别只在解码来源——
+ * 这条路径拿得到精确像素，不需要经过画布往返。
+ *
+ * 返回解码器被调用时收到的参数列表，便于断言 script.js 有没有把格式传对
+ * （把 .dds 当 tga 解会失败，但失败信息不会指出是分流的错）。
  *
  * @param {object} doc loadScript 返回的 document
- * @param {number} width
- * @param {number} height
- * @param {[number,number,number,number]} fill RGBA
+ * @param {{name: string, width: number, height: number, fill: [number,number,number,number]}} opts
+ * @returns {Promise<Array<{name: string, format: string|undefined}>>}
  */
-async function importTga(doc, width, height, fill) {
+async function importWasmImage(doc, { name, width, height, fill }) {
     const data = new Uint8ClampedArray(width * height * 4);
     for (let i = 0; i < data.length; i += 4) {
         data[i] = fill[0];
@@ -899,27 +901,44 @@ async function importTga(doc, width, height, fill) {
     }
 
     const fakeFile = {
-        name: 'test.tga',
+        name,
         size: data.length,
         arrayBuffer: async () => data.buffer,
     };
 
     const win = global.window;
-    const prev = win.NormalMapTga;
-    win.NormalMapTga = {
+    const prev = win.NormalMapDecoder;
+    const calls = [];
+    win.NormalMapDecoder = {
         isSupported: () => true,
-        decode: async () => ({ width, height, data }),
+        decode: async (file, _maxPixels, format) => {
+            calls.push({ name: file.name, format });
+            return { width, height, data };
+        },
     };
 
     try {
         const input = doc.getElementById('fileInput');
         input.files = [fakeFile];
-        input.value = 'C:\\fakepath\\test.tga';
+        input.value = 'C:\\fakepath\\' + name;
         input.__emit('change');
         await flushFrames(12);
     } finally {
-        win.NormalMapTga = prev;
+        win.NormalMapDecoder = prev;
     }
+    return calls;
+}
+
+/**
+ * 模拟导入一张 TGA。importWasmImage 的便捷包装。
+ *
+ * @param {object} doc
+ * @param {number} width
+ * @param {number} height
+ * @param {[number,number,number,number]} fill RGBA
+ */
+async function importTga(doc, width, height, fill) {
+    return importWasmImage(doc, { name: 'test.tga', width, height, fill });
 }
 
 /**
@@ -938,6 +957,7 @@ module.exports = {
     flushFrames,
     importImage,
     importTga,
+    importWasmImage,
     runFix,
     ShimElement,
     ShimCanvas,

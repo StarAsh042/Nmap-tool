@@ -2,8 +2,8 @@
  * build-wasm.mjs — 把 Rust 解码器编译成 wasm，并生成两份产物。
  *
  * 产物：
- *   vendor/tga-decoder.wasm     二进制本体，http(s) 下由 fetch 加载
- *   vendor/tga-decoder-b64.js   base64 内联版，供 file:// 兜底
+ *   vendor/texture-decoder.wasm     二进制本体，http(s) 下由 fetch 加载
+ *   vendor/texture-decoder-b64.js   base64 内联版，供 file:// 兜底
  *
  * 为什么要有 base64 那份：file:// 协议下浏览器会拦截对 .wasm 的 fetch，
  * 双击 index.html 打开时只能靠内联。代价是体积涨三分之一，但只在需要时加载。
@@ -21,13 +21,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const MANIFEST = join(ROOT, 'crates', 'tga-decoder', 'Cargo.toml');
+const MANIFEST = join(ROOT, 'crates', 'texture-decoder', 'Cargo.toml');
 const TARGET = 'wasm32-unknown-unknown';
-const ARTIFACT = join(ROOT, 'crates', 'tga-decoder', 'target', TARGET, 'release', 'tga_decoder.wasm');
+const ARTIFACT = join(ROOT, 'crates', 'texture-decoder', 'target', TARGET, 'release', 'texture_decoder.wasm');
 const OUT_DIR = join(ROOT, 'vendor');
-const OUT_WASM = join(OUT_DIR, 'tga-decoder.wasm');
-const OUT_B64 = join(OUT_DIR, 'tga-decoder-b64.js');
-const OUT_STAMP = join(OUT_DIR, 'tga-decoder.source.sha256');
+const OUT_WASM = join(OUT_DIR, 'texture-decoder.wasm');
+const OUT_B64 = join(OUT_DIR, 'texture-decoder-b64.js');
+const OUT_STAMP = join(OUT_DIR, 'texture-decoder.source.sha256');
 
 /**
  * 参与指纹计算的源码文件。
@@ -80,19 +80,24 @@ writeFileSync(OUT_B64, [
   '/* 本文件由 scripts/build-wasm.mjs 自动生成，请勿手工编辑。',
   ' * 用途：file:// 协议下无法 fetch .wasm，改用内联 base64 兜底。',
   ' * 重新生成：node scripts/build-wasm.mjs */',
-  'self.NormalMapTgaWasmBase64 = "' + b64 + '";',
+  'self.NormalMapDecoderWasmBase64 = "' + b64 + '";',
   ''
 ].join('\n'));
 
 const digest = createHash('sha256').update(wasm).digest('hex');
 
-// 源码指纹：把参与编译的源文件按固定顺序拼起来算一次哈希
+// 源码指纹：把参与编译的源文件按固定顺序拼起来算一次哈希。
+//
+// ⚠ 必须先把 CRLF 归一化成 LF 再算。同一个文件在 Windows 工作区里是 CRLF、
+// 在 CI 检出后是 LF，按原始字节算会得到两个不同的指纹，于是「产物与源码一致」
+// 这条检查会在 CI 上永远报警。归一化之后两个平台算出的指纹相同。
 const stamp = createHash('sha256');
 for (const rel of SOURCE_FILES) {
-  const abs = join(ROOT, 'crates', 'tga-decoder', rel);
+  const abs = join(ROOT, 'crates', 'texture-decoder', rel);
+  const text = readFileSync(abs, 'utf8').split('\r\n').join('\n');
   stamp.update(rel.split('\\').join('/'));
   stamp.update('\0');
-  stamp.update(readFileSync(abs));
+  stamp.update(text, 'utf8');
   stamp.update('\0');
 }
 const sourceDigest = stamp.digest('hex');

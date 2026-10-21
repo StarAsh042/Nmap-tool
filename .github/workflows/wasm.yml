@@ -41,7 +41,7 @@ jobs:
           cargo --version
 
       - name: Rust 单元测试
-        run: cargo test --manifest-path crates/tga-decoder/Cargo.toml
+        run: cargo test --manifest-path crates/texture-decoder/Cargo.toml
 
       - name: 重建 wasm 产物
         run: node scripts/build-wasm.mjs
@@ -55,7 +55,7 @@ jobs:
       # 「改了源码没重编」这个真正要防的问题。
       - name: 校验产物与源码一致
         run: |
-          if ! git diff --exit-code --stat -- vendor/tga-decoder.source.sha256; then
+          if ! git diff --exit-code --stat -- vendor/texture-decoder.source.sha256; then
             echo ""
             echo "::error::Rust 源码已变更但 wasm 产物未重新编译，请运行 npm run build:wasm 并提交 vendor/"
             exit 1

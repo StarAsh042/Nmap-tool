@@ -1,8 +1,8 @@
 [package]
-name = "tga-decoder"
+name = "texture-decoder"
 version = "0.1.0"
 edition = "2021"
-description = "TGA 解码器（编译为 WebAssembly，供 ChannelFixer 使用）"
+description = "纹理解码器：TGA 与 DDS（编译为 WebAssembly，供 ChannelFixer 使用）"
 license = "MIT"
 publish = false
 
@@ -12,6 +12,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # 只开 tga 特性：默认特性会带上 png/jpeg 等解码器，体积翻几倍且本项目用不到
 image = { version = "0.25.10", default-features = false, features = ["tga"] }
+# DDS 是容器格式，块压缩数据要另外解：ddsfile 只负责解析头与定位数据，
+# texture2ddecoder 负责把 BC1-BC7 解成像素。两者都是纯 Rust，可编译到 wasm。
+ddsfile = "0.6.0"
+texture2ddecoder = "0.1.2"
 
 [profile.release]
 opt-level = "s"      # 优化体积而非极限速度：解码不是热点，体积才是

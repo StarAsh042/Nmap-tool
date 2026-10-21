@@ -25,7 +25,7 @@
         <div class="layout">
             <aside class="left-pane">
                 <section class="panel upload-section" id="dropZone">
-                    <input type="file" id="fileInput" accept="image/png, image/jpeg, image/webp, image/gif, image/bmp, image/avif, .tga" aria-label="选择要修复的图片">
+                    <input type="file" id="fileInput" accept="image/png, image/jpeg, image/webp, image/gif, image/bmp, image/avif, .tga, .dds" aria-label="选择要修复的图片">
                     <div class="upload-content">
                         <span class="upload-icon-wrap" aria-hidden="true">
                             <svg class="upload-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -33,7 +33,7 @@
                             </svg>
                         </span>
                         <p class="upload-title">点击选择图片，或拖拽到这里</p>
-                        <p class="upload-hint">支持 PNG / JPEG / WebP / TGA 等格式，拖到页面任意位置均可</p>
+                        <p class="upload-hint">支持 PNG / JPEG / WebP / TGA / DDS 等格式，拖到页面任意位置均可</p>
                         <span class="file-info" id="fileName">未选择文件</span>
                     </div>
                 </section>
@@ -152,7 +152,7 @@
     </div>
 
     <script src="algorithm.js"></script>
-    <script src="tga-decoder.js"></script>
+    <script src="texture-decoder.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
