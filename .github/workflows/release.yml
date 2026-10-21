@@ -1,0 +1,89 @@
+name: Release
+
+# 只在 tag `v*` 上触发。不用 PR 触发发布——发布必须是显式动作。
+#
+# 本文件目前只是基础设施，尚未用于任何真实发版。main 分支落后 dev 若干提交，
+# 版本号也还是 1.0.0；发版流程走完 dev → main 之后才会真正用到它。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    # 产物要写入 Release，只有这个 job 需要写权限
+    permissions:
+      contents: write
+
+    # environment 保护：需要审批时在仓库设置里给 release 加 required reviewers
+    environment: release
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 版本校验：tag 必须与 package.json 的 version 字段一致。
+      # 不一致说明发版流程走错了（漏了改版本号，或 tag 打错），此时构建产物
+      # 的版本号会与 tag 不符，用户拿到的包对不上自己引用的版本。
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "tag: $TAG    package.json: $PKG_VERSION"
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "::error::tag v$TAG 与 package.json 版本 $PKG_VERSION 不一致"
+            exit 1
+          fi
+
+      # 本项目零构建步骤（纯静态、零运行时依赖），产物就是把站点文件打包。
+      # 将来若引入构建，这一步要换成真实 build，并保留版本号注入。
+      - name: 打包静态站点
+        run: |
+          set -euo pipefail
+          mkdir -p dist/FixNormalMapChannel
+          for f in index.html style.css algorithm.js script.js texture-decoder.js worker.js \
+                   tex_ss_5027_bs_face_n.png FixNormalMapChannel.png LICENSE README.md; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少发布文件：$f"
+              exit 1
+            fi
+            cp "$f" dist/FixNormalMapChannel/
+          done
+          cp -r vendor dist/FixNormalMapChannel/
+          # 不打包测试、CI、Rust 源码——它们不是运行时产物
+          (cd dist && zip -qr "FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip" FixNormalMapChannel)
+
+      # 附件完整性：用户下载后能自己校验，不需要信任上传过程。
+      - name: 生成 SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 上传 Release 产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "FixNormalMapChannel ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            "dist/FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip" \
+            "dist/SHA256SUMS"
+
+      - name: 回读校验
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq '.assets[].name' | tee /tmp/assets.txt
+          grep -q "FixNormalMapChannel-v${GITHUB_REF_NAME#v}.zip" /tmp/assets.txt || { echo "::error::产物未上传成功"; exit 1; }
+          grep -q "SHA256SUMS" /tmp/assets.txt || { echo "::error::校验文件未上传成功"; exit 1; }

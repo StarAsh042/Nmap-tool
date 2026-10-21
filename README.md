@@ -144,6 +144,31 @@ FixNormalMapChannel/
 
 分支流向：`feature/xxx` → `dev`（日常集成）→ `main`（发布版本）
 
+## CI
+
+`.github/workflows/ci.yml`，触发条件为 PR 与 push 到 `main` / `dev`。四个 job：
+
+| job | 内容 |
+| --- | --- |
+| `unit` | `npm test` + `npm run smoke` |
+| `wasm` | `cargo test --locked`、重建 wasm 产物、校验产物与源码一致 |
+| `security` | `cargo audit`、gitleaks 密钥扫描、前端零依赖断言 |
+| `ci` | 聚合 job，唯一 required check |
+
+`ci` 是分支保护登记的唯一检查名。job 改名时必须同步更新分支保护，否则 PR 会卡在缺失的检查上。
+
+刻意**没有**用 `paths` 过滤：required workflow 一旦按路径过滤，只改文档的 PR 会永久卡在 `Expected — Waiting for status to be reported`。
+
+## 发布
+
+`.github/workflows/release.yml`，由 tag `v*` 触发，流程为：校验 tag 与 `package.json` 版本一致 → 打包静态站点 → 生成 `SHA256SUMS` → 上传 Release → 回读校验产物。
+
+```
+git tag -a v1.1.0 -m "..." && git push origin v1.1.0
+```
+
+tag 的版本号必须与 `package.json` 的 `version` 字段一致，否则 workflow 会失败——版本对不上时，用户下载到的包和他引用的版本不是同一个东西。
+
 ## 开发与部署
 - 静态部署到任意静态托管平台（GitHub Pages、Netlify、Vercel 等）
 - 或本地运行任意静态服务器（如 `http-server`, `python -m http.server`）
