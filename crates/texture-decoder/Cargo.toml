@@ -2,7 +2,7 @@
 name = "texture-decoder"
 version = "0.1.0"
 edition = "2021"
-description = "纹理解码器：TGA 与 DDS（编译为 WebAssembly，供 ChannelFixer 使用）"
+description = "纹理解码器：TGA 与 DDS（编译为 WebAssembly，供 Nmap-tool 使用）"
 license = "MIT"
 publish = false
 
