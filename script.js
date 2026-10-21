@@ -6,7 +6,7 @@
  *   - 任务令牌与取消，消除「处理中导入新图」造成的竞态
  *   - 执行层调度：Worker 优先，不可用时降级为主线程分片
  *   - 结果导出（toBlob + ObjectURL）与历史记录快照管理
- *   - 通道信息徽标
+ *   - 通道信息徽标与页内原尺寸预览浮层
  *   - 页内原尺寸预览浮层
  *
  * Worker 执行层在 file:// 等无法构造 Worker 的环境下自动降级为主线程分片。
@@ -27,6 +27,9 @@
 
     /* 进度文案的最小更新间隔，避免高频刷新 */
     var LABEL_THROTTLE_MS = 120;
+
+    /* 浮层过渡时长，与 CSS 中 --dur 保持一致 */
+    var OVERLAY_TRANSITION_MS = 200;
 
     /* 静态图标（常量字符串，不含任何用户数据） */
     var ICON_DOWNLOAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>';
@@ -59,9 +62,12 @@
         var activeJob = null;
         var worker = null;
         var workerAvailable = typeof Worker === 'function';
+        var lastFocused = null;
+        var overlayTimer = null;
 
         var ctxOriginal = el.originalCanvas.getContext('2d', { willReadFrequently: true });
         var ctxProcessed = el.processedCanvas.getContext('2d');
+        var ctxOverlay = el.overlayCanvas ? el.overlayCanvas.getContext('2d') : null;
 
         if (!Algo) {
             if (el.statusMessage) {
@@ -101,6 +107,8 @@
 
                 originalCanvas: byId('originalCanvas'),
                 processedCanvas: byId('processedCanvas'),
+                originalWrap: byId('originalWrap'),
+                fixedWrap: byId('fixedWrap'),
                 originalEmpty: byId('originalEmpty'),
                 fixedEmpty: byId('fixedEmpty'),
                 originalRes: byId('originalRes'),
@@ -120,6 +128,11 @@
                 statusPill: byId('statusPill'),
                 statusPillText: byId('statusPillText'),
 
+                overlay: byId('previewOverlay'),
+                overlayCanvas: byId('overlayCanvas'),
+                overlayTitle: byId('overlayTitle'),
+                overlayMeta: byId('overlayMeta'),
+                overlayClose: byId('overlayClose')
             };
         }
 
@@ -154,6 +167,35 @@
             if (el.historyList) {
                 el.historyList.addEventListener('click', onHistoryClick);
             }
+
+            [el.originalWrap, el.fixedWrap].forEach(function (wrap) {
+                if (!wrap) {
+                    return;
+                }
+                wrap.addEventListener('click', function () {
+                    var canvas = wrap.querySelector('canvas');
+                    if (!canvas || !canvas.classList.contains('is-visible') || !canvas.width) {
+                        return;
+                    }
+                    openPreview(canvas);
+                });
+            });
+
+            if (el.overlayClose) {
+                el.overlayClose.addEventListener('click', closePreview);
+            }
+            if (el.overlay) {
+                el.overlay.addEventListener('click', function (event) {
+                    if (event.target && event.target.dataset && event.target.dataset.action === 'close-preview') {
+                        closePreview();
+                    }
+                });
+            }
+            document.addEventListener('keydown', function (event) {
+                if (event.key === 'Escape') {
+                    closePreview();
+                }
+            });
             window.addEventListener('beforeunload', function () {
                 historyItems = [];
             });
@@ -266,6 +308,17 @@
 
         function showCanvas(canvas, visible) {
             canvas.classList.toggle('is-visible', visible);
+            var wrap = canvas.parentElement;
+            if (!wrap) {
+                return;
+            }
+            var clickable = visible && canvas.width > 0;
+            wrap.classList.toggle('is-clickable', clickable);
+            if (clickable) {
+                wrap.title = '点击放大查看原尺寸';
+            } else {
+                wrap.removeAttribute('title');
+            }
         }
 
         function hideProcessed() {
@@ -918,6 +971,70 @@
             historyItems = [];
             renderHistory();
             setStatus('info', '历史记录已清空。');
+        }
+
+        /* ====================================================================
+           原尺寸预览浮层
+           ==================================================================== */
+        function openPreview(sourceCanvas) {
+            if (!ctxOverlay || !el.overlay || !el.overlayCanvas) {
+                return;
+            }
+            if (overlayTimer) {
+                clearTimeout(overlayTimer);
+                overlayTimer = null;
+            }
+            try {
+                el.overlayCanvas.width = sourceCanvas.width;
+                el.overlayCanvas.height = sourceCanvas.height;
+                ctxOverlay.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+                ctxOverlay.drawImage(sourceCanvas, 0, 0);
+            } catch (err) {
+                setStatus('error', '无法放大预览：' + describeError(err));
+                return;
+            }
+
+            if (el.overlayTitle) {
+                el.overlayTitle.textContent = sourceCanvas === el.originalCanvas ? '原图 · 原尺寸预览' : '修复结果 · 原尺寸预览';
+            }
+            if (el.overlayMeta) {
+                el.overlayMeta.textContent = formatSize(sourceCanvas.width, sourceCanvas.height);
+            }
+
+            lastFocused = document.activeElement;
+            el.overlay.hidden = false;
+            requestAnimationFrame(function () {
+                if (el.overlay) {
+                    el.overlay.classList.add('is-open');
+                }
+            });
+            if (el.overlayClose) {
+                el.overlayClose.focus();
+            }
+        }
+
+        function closePreview() {
+            if (!el.overlay || el.overlay.hidden) {
+                return;
+            }
+            el.overlay.classList.remove('is-open');
+            if (overlayTimer) {
+                clearTimeout(overlayTimer);
+            }
+            overlayTimer = setTimeout(function () {
+                el.overlay.hidden = true;
+                // 释放放大预览占用的画布内存
+                if (el.overlayCanvas) {
+                    el.overlayCanvas.width = 0;
+                    el.overlayCanvas.height = 0;
+                }
+                overlayTimer = null;
+            }, OVERLAY_TRANSITION_MS);
+
+            if (lastFocused && typeof lastFocused.focus === 'function') {
+                lastFocused.focus();
+            }
+            lastFocused = null;
         }
 
         /* ====================================================================
