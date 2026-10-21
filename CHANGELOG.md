@@ -45,4 +45,4 @@
 - CI 四个 job（`unit` / `wasm` / `security` / 聚合 `ci`），含依赖漏洞扫描与密钥扫描
 - 发布流程由 tag 触发，自动校验版本号、打包产物并生成 SHA256SUMS
 
-[1.0.0]: https://github.com/StarAsh042/fix-normalmap-channel/releases/tag/v1.0.0
+[1.0.0]: https://github.com/StarAsh042/Nmap-tool/releases/tag/v1.0.0
