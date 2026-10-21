@@ -20,12 +20,12 @@ jobs:
         uses: actions/checkout@v4
 
       # 本项目零运行时依赖，Node 内置 test runner 即可运行，无需 npm install。
-      # 仍执行 npm ci 以确保 lockfile 与 package.json 一致（存在 lockfile 时）。
+      # setup-node 的 cache 仅接受 'npm' 等固定值，不接受 'none'；
+      # 本项目无 lockfile，因此直接省略该字段（不写即不启用缓存）。
       - name: 准备 Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: none
 
       - name: 安装依赖
         run: |
@@ -37,6 +37,9 @@ jobs:
 
       - name: 语法检查
         run: npm run lint
+
+      - name: CI 配置自检
+        run: npm run lint:ci
 
       - name: 单元测试与集成测试
         run: npm test
