@@ -2,11 +2,13 @@
  * script.js — 交互与状态层
  *
  * 职责：
+ *   - 显式状态机（idle / loading / ready / processing / done / error）
  *   - 导入本地图片并绘制到原图画布
  *   - 调用 algorithm.js 完成通道映射
+ *   - 进度与状态反馈
  *   - 导出修复结果为 PNG
  *
- * 本版本为最小闭环：单线程同步处理，尚无状态机、后台线程与历史记录。
+ * 本版本引入显式状态机与可见反馈，处理仍在主线程同步完成。
  *
  * 算法实现位于 algorithm.js，本文件不重复实现通道映射。
  */
@@ -14,6 +16,15 @@
     'use strict';
 
     var Algo = window.NormalMapChannel;
+
+    var STATE_META = {
+        idle: { level: 'idle', text: '等待导入' },
+        loading: { level: 'busy', text: '读取中' },
+        ready: { level: 'ready', text: '已就绪' },
+        processing: { level: 'busy', text: '处理中' },
+        done: { level: 'done', text: '已完成' },
+        error: { level: 'error', text: '需要处理' }
+    };
 
     /* ---------------- 入口 ---------------- */
     document.addEventListener('DOMContentLoaded', init);
@@ -25,9 +36,9 @@
         }
 
         /* ---------------- 运行时状态 ---------------- */
+        var appState = 'idle';
         var sourceInfo = null;      // { name, width, height }
         var lastResult = null;      // { blob, name, width, height }
-        var busy = false;
 
         var ctxOriginal = el.originalCanvas.getContext('2d', { willReadFrequently: true });
         var ctxProcessed = el.processedCanvas.getContext('2d');
@@ -48,7 +59,10 @@
            ==================================================================== */
         function start() {
             bindEvents();
+            setState('idle');
             setStatus('info', '导入一张法线贴图后即可开始修复。');
+            resetProgress();
+            setWaiting(false);
             setLabel('等待处理');
             hideProcessed();
         }
@@ -72,8 +86,13 @@
                 originalRes: byId('originalRes'),
                 fixedRes: byId('fixedRes'),
 
+                progressTrack: byId('progressTrack'),
+                progressFill: byId('progressFill'),
                 progressLabel: byId('progressLabel'),
-                statusMessage: byId('statusMessage')
+                statusMessage: byId('statusMessage'),
+
+                statusPill: byId('statusPill'),
+                statusPillText: byId('statusPillText')
             };
         }
 
@@ -105,8 +124,36 @@
         }
 
         /* ====================================================================
-           反馈
+           状态与反馈
            ==================================================================== */
+        function setState(next) {
+            appState = next;
+            var meta = STATE_META[next] || STATE_META.idle;
+            if (el.statusPill) {
+                el.statusPill.dataset.level = meta.level;
+            }
+            if (el.statusPillText) {
+                el.statusPillText.textContent = meta.text;
+            }
+            syncControls();
+        }
+
+        function syncControls() {
+            var busy = appState === 'loading' || appState === 'processing';
+            if (el.fixBtn) {
+                el.fixBtn.disabled = busy || !sourceInfo;
+            }
+            if (el.downloadBtn) {
+                el.downloadBtn.disabled = appState !== 'done';
+            }
+            if (el.fileInput) {
+                el.fileInput.disabled = busy;
+            }
+            if (el.dropZone) {
+                el.dropZone.classList.toggle('is-busy', busy);
+            }
+        }
+
         function setStatus(level, message) {
             if (!el.statusMessage) {
                 return;
@@ -122,6 +169,36 @@
         function setLabel(text) {
             if (el.progressLabel) {
                 el.progressLabel.textContent = text;
+            }
+        }
+
+        function setProgress(pct) {
+            var clamped = Math.max(0, Math.min(100, pct));
+            if (el.progressFill) {
+                el.progressFill.style.transform = 'scaleX(' + (clamped / 100) + ')';
+            }
+            if (el.progressTrack) {
+                el.progressTrack.setAttribute('aria-valuenow', String(clamped));
+                el.progressTrack.classList.toggle('is-complete', clamped >= 100);
+            }
+        }
+
+        function resetProgress() {
+            if (el.progressTrack) {
+                el.progressTrack.classList.remove('is-complete');
+                el.progressTrack.setAttribute('aria-valuenow', '0');
+            }
+            if (el.progressFill) {
+                el.progressFill.style.transition = 'none';
+                el.progressFill.style.transform = 'scaleX(0)';
+                void el.progressFill.offsetWidth;
+                el.progressFill.style.transition = '';
+            }
+        }
+
+        function setWaiting(isWaiting) {
+            if (el.progressTrack) {
+                el.progressTrack.classList.toggle('is-indeterminate', isWaiting);
             }
         }
 
@@ -141,9 +218,10 @@
            ==================================================================== */
         function loadFile(file) {
             clearResult();
-            busy = true;
-            el.fixBtn.disabled = true;
-            el.downloadBtn.disabled = true;
+            setState('loading');
+            if (el.dropZone) {
+                el.dropZone.classList.remove('has-error');
+            }
 
             if (el.fileName) {
                 el.fileName.textContent = (file.name || '未命名文件') + ' · ' + formatBytes(file.size);
@@ -159,6 +237,8 @@
                 el.originalEmpty.hidden = false;
             }
             setLabel('等待处理');
+            resetProgress();
+            setWaiting(false);
             setStatus('busy', '正在读取 ' + (file.name || '图片') + ' …');
 
             decodeImage(file).then(function (source) {
@@ -212,7 +292,6 @@
                 width: w,
                 height: h
             };
-            busy = false;
 
             if (el.originalRes) {
                 el.originalRes.textContent = formatSize(w, h);
@@ -221,15 +300,13 @@
             if (el.originalEmpty) {
                 el.originalEmpty.hidden = true;
             }
-            el.fixBtn.disabled = false;
+            setState('ready');
             setStatus('success', '已载入 ' + sourceInfo.name + '（' + formatSize(w, h) + '），可以开始修复。');
         }
 
         function failLoad(message) {
             sourceInfo = null;
-            busy = false;
-            el.fixBtn.disabled = true;
-            el.downloadBtn.disabled = true;
+            lastResult = null;
             if (el.dropZone) {
                 el.dropZone.classList.add('has-error');
             }
@@ -237,6 +314,10 @@
             if (el.originalEmpty) {
                 el.originalEmpty.hidden = false;
             }
+            resetProgress();
+            setWaiting(false);
+            setLabel('等待处理');
+            setState('error');
             setStatus('error', message);
         }
 
@@ -244,7 +325,7 @@
            处理流程
            ==================================================================== */
         function startProcessing() {
-            if (busy) {
+            if (appState === 'loading' || appState === 'processing') {
                 return;
             }
             if (!sourceInfo) {
@@ -260,10 +341,10 @@
             }
 
             var startedAt = now();
-            busy = true;
-            el.fixBtn.disabled = true;
-            el.downloadBtn.disabled = true;
             hideProcessed();
+            setState('processing');
+            resetProgress();
+            setWaiting(true);
             setLabel('处理中…');
             setStatus('busy', '正在修复通道…（' + formatSize(w, h) + '）');
 
@@ -278,7 +359,12 @@
             }
 
             try {
-                Algo.processChannels(src, dstData.data, w, h);
+                Algo.processChannels(src, dstData.data, w, h, function (rowsDone, total) {
+                    setWaiting(false);
+                    var pct = total ? Math.round((rowsDone / total) * 100) : 0;
+                    setProgress(pct);
+                    setLabel('处理中… ' + pct + '%');
+                });
             } catch (err) {
                 failJob('处理过程中出错：' + describeError(err));
                 return;
@@ -297,9 +383,10 @@
                 return;
             }
 
-            busy = false;
             var elapsed = Math.round(now() - startedAt);
 
+            setWaiting(false);
+            setProgress(100);
             showCanvas(el.processedCanvas, true);
             if (el.fixedEmpty) {
                 el.fixedEmpty.hidden = true;
@@ -307,7 +394,7 @@
             if (el.fixedRes) {
                 el.fixedRes.textContent = formatSize(imageData.width, imageData.height);
             }
-            el.downloadBtn.disabled = false;
+            setState('done');
             setLabel('耗时 ' + elapsed + ' ms');
             setStatus('success', '通道修复完成：' + formatSize(imageData.width, imageData.height) + '，耗时 ' + elapsed + ' ms。可下载结果或导入新图片。');
 
@@ -315,10 +402,10 @@
         }
 
         function failJob(message) {
-            busy = false;
-            el.downloadBtn.disabled = true;
+            setWaiting(false);
             setLabel('处理失败');
             hideProcessed();
+            setState('error');
             setStatus('error', message + ' 原图仍保留，可重试或更换图片。');
         }
 
@@ -345,6 +432,9 @@
         }
 
         function handleDownload() {
+            if (appState !== 'done') {
+                return;
+            }
             if (!lastResult || !lastResult.blob) {
                 return;
             }
