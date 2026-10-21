@@ -136,6 +136,225 @@ fn uncompressed_bgra(dxgi: Option<DxgiFormat>, d3d: Option<D3DFormat>) -> Option
     }
 }
 
+/// 直接从头部 FourCC 推断 DXGI 格式。
+///
+/// `ddsfile` 的映射表覆盖了 `ATI1` / `ATI2`，却漏了同样常见的 `BC4U` / `BC5U`
+/// 写法——而 texconv（微软官方工具）默认就写 `BC5U`。真实文件因此解码失败，
+/// 手工构造的 `ATI2` 样本却测不出来。这里补齐，避免依赖上游的覆盖范围。
+fn dxgi_from_fourcc(dds: &Dds) -> Option<DxgiFormat> {
+    let code = dds.header.spf.fourcc.as_ref()?.0.to_le_bytes();
+    match &code {
+        b"BC5U" | b"ATI2" => Some(DxgiFormat::BC5_UNorm),
+        b"BC5S" => Some(DxgiFormat::BC5_SNorm),
+        b"BC4U" | b"ATI1" => Some(DxgiFormat::BC4_UNorm),
+        b"BC4S" => Some(DxgiFormat::BC4_SNorm),
+        b"DXT1" => Some(DxgiFormat::BC1_UNorm),
+        b"DXT3" => Some(DxgiFormat::BC2_UNorm),
+        b"DXT5" => Some(DxgiFormat::BC3_UNorm),
+        _ => None,
+    }
+}
+
+
+/// RGB565 展开成 8 位（位复制）。
+fn rgb565_expand(v: u16) -> (u32, u32, u32) {
+    let r = ((v >> 11) & 31) as u32;
+    let g = ((v >> 5) & 63) as u32;
+    let b = (v & 31) as u32;
+    ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+}
+
+/// BC1/BC2/BC3 共用的颜色块解码。
+///
+/// 不用库的 `decode_bc1_block`：它的插值用截断除法，而 DirectXTex（texconv）
+/// 用四舍五入，逐字节比对时会在 G/B 通道产生 1 的偏差。
+///
+/// @param use_alpha c0 <= c1 时索引 3 是否为「透明黑」
+fn decode_bc1_color_block(data: &[u8], block: &mut [u32; 16], use_alpha: bool) {
+    let c0 = u16::from_le_bytes([data[0], data[1]]);
+    let c1 = u16::from_le_bytes([data[2], data[3]]);
+    let (r0, g0, b0) = rgb565_expand(c0);
+    let (r1, g1, b1) = rgb565_expand(c1);
+
+    let mut pal = [[0u8; 4]; 4];
+    pal[0] = [r0 as u8, g0 as u8, b0 as u8, 255];
+    pal[1] = [r1 as u8, g1 as u8, b1 as u8, 255];
+    let opaque0 = c0 > c1;
+    if opaque0 {
+        pal[2] = [
+            ((2 * r0 + r1 + 1) / 3) as u8,
+            ((2 * g0 + g1 + 1) / 3) as u8,
+            ((2 * b0 + b1 + 1) / 3) as u8,
+            255,
+        ];
+        pal[3] = [
+            ((r0 + 2 * r1 + 1) / 3) as u8,
+            ((g0 + 2 * g1 + 1) / 3) as u8,
+            ((b0 + 2 * b1 + 1) / 3) as u8,
+            255,
+        ];
+    } else {
+        pal[2] = [
+            ((r0 + r1 + 1) / 2) as u8,
+            ((g0 + g1 + 1) / 2) as u8,
+            ((b0 + b1 + 1) / 2) as u8,
+            255,
+        ];
+        pal[3] = [0, 0, 0, if use_alpha { 0 } else { 255 }];
+    }
+
+    let mut d = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    for slot in block.iter_mut() {
+        let p = pal[(d & 3) as usize];
+        d >>= 2;
+        *slot = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32) | ((p[3] as u32) << 24);
+    }
+}
+
+/// 解一个 8 字节的 alpha 块（BC3 的 alpha 段、BC4、BC5 的单个通道）。
+///
+/// 为什么不用 texture2ddecoder 的 `decode_bc3_alpha`：它把 48 位索引字段写成
+/// `(u64::from_le_bytes(data[..8]) >> 16) as usize`。`usize` 在 x86_64 上是 64 位，
+/// 在 **wasm32 上是 32 位**——高 16 位被静默截断。32 位只够前 11 个像素（每像素
+/// 3 位），所以每个 4×4 块的第 11–15 个像素在浏览器里必然解错。
+///
+/// 这个 bug 在 64 位主机上的单元测试永远发现不了，只有真实文件 + wasm 才暴露。
+/// 我们用 u64 全程保存索引，绕开它。
+///
+/// @param data 8 字节：a0, a1, 6 字节索引位
+/// @param words 16 个像素的输出缓冲（BGRA 打包）
+/// @param channel 写入哪个通道（0=B 1=G 2=R 3=A）
+fn decode_alpha_block(data: &[u8], words: &mut [u32], channel: usize) {
+    let a0 = data[0] as u32;
+    let a1 = data[1] as u32;
+
+    let mut pal = [0u32; 8];
+    pal[0] = a0;
+    pal[1] = a1;
+    if a0 > a1 {
+        // 8 值模式：a0 与 a1 之间线性插值 6 档
+        for i in 1..=6u32 {
+            // +3 是四舍五入：DirectXTex（texconv）用 round，截断会产生 1 的偏差
+            pal[(i + 1) as usize] = ((7 - i) * a0 + i * a1 + 3) / 7;
+        }
+    } else {
+        // 6 值模式：插值 4 档，另外两档固定为 0 与 255
+        for i in 1..=4u32 {
+            pal[(i + 1) as usize] = ((5 - i) * a0 + i * a1 + 2) / 5;
+        }
+        pal[6] = 0;
+        pal[7] = 255;
+    }
+
+    // 48 位索引，必须用 u64 承载——用 usize 会在 wasm32 上被截断
+    let mut bits: u64 = 0;
+    for i in 0..6 {
+        bits |= (data[2 + i] as u64) << (8 * i);
+    }
+
+    let shift = (channel * 8) as u32;
+    let mask = !(0xFFu32 << shift);
+    for (i, word) in words.iter_mut().enumerate().take(16) {
+        let idx = ((bits >> (3 * i)) & 7) as usize;
+        *word = (*word & mask) | (pal[idx] << shift);
+    }
+}
+
+/// 把一个 4×4 块写进整图，超出边界的部分丢弃。
+fn copy_block(bx: usize, by: usize, width: usize, height: usize, block: &[u32; 16], out: &mut [u32]) {
+    for y in 0..4 {
+        let py = by * 4 + y;
+        if py >= height {
+            break;
+        }
+        for x in 0..4 {
+            let px = bx * 4 + x;
+            if px >= width {
+                break;
+            }
+            out[py * width + px] = block[y * 4 + x];
+        }
+    }
+}
+
+/// BC4：单通道，按惯例铺成灰度（R=G=B）。
+///
+/// texconv 把 BC4 展开成 RGBA8 时也是这么做的，保持一致。
+fn decode_bc4_ours(blocks: &[u8], width: usize, height: usize, out: &mut [u32]) {
+    let bx_count = width.div_ceil(4);
+    let by_count = height.div_ceil(4);
+    for by in 0..by_count {
+        for bx in 0..bx_count {
+            let off = (by * bx_count + bx) * 8;
+            let mut block = [0u32; 16];
+            decode_alpha_block(&blocks[off..off + 8], &mut block, 2); // R
+            for word in block.iter_mut() {
+                let v = (*word >> 16) & 0xFF;
+                *word = (255 << 24) | (v << 16) | (v << 8) | v; // R=G=B，A=255
+            }
+            copy_block(bx, by, width, height, &block, out);
+        }
+    }
+}
+
+/// BC5：两个通道块，前 8 字节给 R，后 8 字节给 G，B 为 0、A 为 255。
+fn decode_bc5_ours(blocks: &[u8], width: usize, height: usize, out: &mut [u32]) {
+    let bx_count = width.div_ceil(4);
+    let by_count = height.div_ceil(4);
+    for by in 0..by_count {
+        for bx in 0..bx_count {
+            let off = (by * bx_count + bx) * 16;
+            let mut block = [0u32; 16];
+            decode_alpha_block(&blocks[off..off + 8], &mut block, 2);      // R
+            decode_alpha_block(&blocks[off + 8..off + 16], &mut block, 1); // G
+            for word in block.iter_mut() {
+                *word |= 255 << 24; // A=255，B 保持 0
+            }
+            copy_block(bx, by, width, height, &block, out);
+        }
+    }
+}
+
+/// BC3：独立的 alpha 块 + BC1 颜色块。
+///
+/// ⚠ 布局是 **alpha 在前、颜色在后**（DXT5 的约定），写反了不会报错，
+/// 只会解出一张完全错位的图。
+///
+/// 颜色部分复用库的 `decode_bc1_block`（它用 u32 承载 32 位索引，没有截断问题），
+/// alpha 部分用我们自己的实现，避开 wasm32 上的截断 bug。
+fn decode_bc3_ours(blocks: &[u8], width: usize, height: usize, out: &mut [u32]) {
+    let bx_count = width.div_ceil(4);
+    let by_count = height.div_ceil(4);
+    for by in 0..by_count {
+        for bx in 0..bx_count {
+            let off = (by * bx_count + bx) * 16;
+            // 顺序很重要：颜色解码会写入 A=255，先解 alpha 会被覆盖掉
+            let mut block = [0u32; 16];
+            decode_bc1_color_block(&blocks[off + 8..off + 16], &mut block, true); // 颜色在后
+            decode_alpha_block(&blocks[off..off + 8], &mut block, 3);          // A 在前，最后写
+            copy_block(bx, by, width, height, &block, out);
+        }
+    }
+}
+
+/// BC1：颜色块，含 1 位透明模式。
+///
+/// 当块内两个端点满足 c0 <= c1 时，索引 3 表示「透明黑」，DirectXTex 与 DXT1
+/// 规范都是这么解的。库的 `decode_bc1` 走的是不透明分支，会把这类像素解成
+/// 不透明黑，与参考实现不一致——所以这里用 `decode_bc1a_block`。
+fn decode_bc1_ours(blocks: &[u8], width: usize, height: usize, out: &mut [u32]) {
+    let bx_count = width.div_ceil(4);
+    let by_count = height.div_ceil(4);
+    for by in 0..by_count {
+        for bx in 0..bx_count {
+            let off = (by * bx_count + bx) * 8;
+            let mut block = [0u32; 16];
+            decode_bc1_color_block(&blocks[off..off + 8], &mut block, true);
+            copy_block(bx, by, width, height, &block, out);
+        }
+    }
+}
+
 /// 每种块压缩格式的单块字节数；不支持返回 None。
 fn block_size(fmt: DxgiFormat) -> Option<usize> {
     match fmt {
@@ -165,9 +384,14 @@ fn decode_dds(input: &[u8], max_pixels: u32) -> Option<(Vec<u8>, u32, u32)> {
         return None;
     }
 
-    let dxgi = dds.get_dxgi_format();
+    let dxgi = dds.get_dxgi_format().or_else(|| dxgi_from_fourcc(&dds));
     let d3d = dds.get_d3d_format();
-    let data = dds.get_data(0).ok()?;
+
+    // 直接用 dds.data 而不是 get_data(0)：后者要先算 pitch，而 pitch 依赖
+    // 格式能被识别——BC5U 这类 ddsfile 不认识的 FourCC 会在那里就报错，
+    // 我们的兜底根本轮不到执行。dds.data 是「头部之后的所有字节」，
+    // 自己按格式算出需要多少、切出来即可。
+    let data: &[u8] = &dds.data;
     let pixel_count = (width as usize) * (height as usize);
 
     // ---- 未压缩 ----
@@ -197,32 +421,41 @@ fn decode_dds(input: &[u8], max_pixels: u32) -> Option<(Vec<u8>, u32, u32)> {
     let bsize = block_size(fmt)?;
     let blocks_x = (width as usize).div_ceil(4);
     let blocks_y = (height as usize).div_ceil(4);
+    let needed = blocks_x * blocks_y * bsize;
     // 数据不足时直接拒绝：解码器按块数切片，长度不够会 panic，
     // 而 panic 在 wasm 里等于整个模块抛异常，不如在这里返回失败
-    if data.len() < blocks_x * blocks_y * bsize {
+    if data.len() < needed {
         return None;
     }
+    // 切掉后面的 mip 层级，只把最顶层交给解码器
+    let blocks = &data[..needed];
 
     let mut words = vec![0u32; pixel_count];
     let (w, h) = (width as usize, height as usize);
     let ok = match fmt {
         DxgiFormat::BC1_UNorm | DxgiFormat::BC1_UNorm_sRGB => {
-            texture2ddecoder::decode_bc1(data, w, h, &mut words).is_ok()
+            decode_bc1_ours(blocks, w, h, &mut words);
+            true
         }
         DxgiFormat::BC2_UNorm | DxgiFormat::BC2_UNorm_sRGB => {
-            texture2ddecoder::decode_bc2(data, w, h, &mut words).is_ok()
+            texture2ddecoder::decode_bc2(blocks, w, h, &mut words).is_ok()
         }
+        // BC3 / BC4 / BC5 都含 alpha 块，库实现在 wasm32 上会截断索引，
+        // 因此走我们自己的实现（见 decode_alpha_block 的说明）
         DxgiFormat::BC3_UNorm | DxgiFormat::BC3_UNorm_sRGB => {
-            texture2ddecoder::decode_bc3(data, w, h, &mut words).is_ok()
+            decode_bc3_ours(blocks, w, h, &mut words);
+            true
         }
         DxgiFormat::BC4_UNorm | DxgiFormat::BC4_SNorm => {
-            texture2ddecoder::decode_bc4(data, w, h, &mut words).is_ok()
+            decode_bc4_ours(blocks, w, h, &mut words);
+            true
         }
         DxgiFormat::BC5_UNorm | DxgiFormat::BC5_SNorm => {
-            texture2ddecoder::decode_bc5(data, w, h, &mut words).is_ok()
+            decode_bc5_ours(blocks, w, h, &mut words);
+            true
         }
         DxgiFormat::BC7_UNorm | DxgiFormat::BC7_UNorm_sRGB => {
-            texture2ddecoder::decode_bc7(data, w, h, &mut words).is_ok()
+            texture2ddecoder::decode_bc7(blocks, w, h, &mut words).is_ok()
         }
         _ => false,
     };
@@ -408,6 +641,30 @@ mod tests {
 
         let (pixels, _, _) = decode_dds(&file, 100).expect("BC5 应解码成功");
         assert_eq!(&pixels[0..4], &[10, 30, 0, 255], "R/G 取两个通道的首端点，B 为 0");
+    }
+
+    #[test]
+    fn dds_decodes_bc5_with_bc5u_fourcc() {
+        // texconv（微软官方工具）默认写 "BC5U"，而 ddsfile 的映射表只认 "ATI2"。
+        // 这条用例锁住我们自己的 FourCC 兜底：真实文件用 BC5U，手工样本用 ATI2，
+        // 只测 ATI2 会漏掉这个真实的兼容问题。
+        let (w, h) = (4u32, 4u32);
+        let mut file = dds_header(w, h, 0x81007, 16, &pf_fourcc(b"BC5U"));
+        file.extend_from_slice(&[10, 20, 0, 0, 0, 0, 0, 0]);
+        file.extend_from_slice(&[30, 40, 0, 0, 0, 0, 0, 0]);
+
+        let (pixels, _, _) = decode_dds(&file, 100).expect("BC5U 应解码成功");
+        assert_eq!(&pixels[0..4], &[10, 30, 0, 255]);
+    }
+
+    #[test]
+    fn dds_decodes_bc4_with_bc4u_fourcc() {
+        let (w, h) = (4u32, 4u32);
+        let mut file = dds_header(w, h, 0x81007, 8, &pf_fourcc(b"BC4U"));
+        file.extend_from_slice(&[10, 20, 0, 0, 0, 0, 0, 0]);
+
+        let (pixels, _, _) = decode_dds(&file, 100).expect("BC4U 应解码成功");
+        assert_eq!(&pixels[0..4], &[10, 10, 10, 255], "单通道应铺到 R/G/B");
     }
 
     #[test]
