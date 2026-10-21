@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 语法检查与单元测试
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 本项目零运行时依赖，Node 内置 test runner 即可运行，无需 npm install。
+      # 仍执行 npm ci 以确保 lockfile 与 package.json 一致（存在 lockfile 时）。
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: none
+
+      - name: 安装依赖
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "无 package-lock.json，跳过安装（本项目零依赖）"
+          fi
+
+      - name: 语法检查
+        run: npm run lint
+
+      - name: 单元测试与集成测试
+        run: npm test
+
+      - name: 静态站点冒烟检查
+        run: npm run smoke
