@@ -119,8 +119,9 @@ FixNormalMapChannel/
 ├── texture-decoder.js    # 解码层：wasm 加载与数据搬运（file:// 下走内联 base64）
 ├── vendor/           # wasm 产物（已编译入库，克隆即用）
 ├── crates/texture-decoder/  # wasm 解码器的 Rust 源码
-├── scripts/          # 静态服务器、冒烟检查、wasm 构建脚本
+├── scripts/          # 静态服务器、冒烟检查、wasm 构建、DDS 兼容性验证
 ├── test/             # 单元测试、等价测试、wasm 集成测试、DOM 垫片
+├── test/fixtures/dds/  # 真实 DDS 固件（texconv 生成，含参照展开结果）
 ├── tex_ss_5027_bs_face_n.png  # 示例法线贴图
 ├── FixNormalMapChannel.png    # README 配图
 ├── LICENSE
@@ -147,6 +148,7 @@ FixNormalMapChannel/
 - 静态部署到任意静态托管平台（GitHub Pages、Netlify、Vercel 等）
 - 或本地运行任意静态服务器（如 `http-server`, `python -m http.server`）
 - 修改了 `crates/texture-decoder/` 之后需要重新编译产物：`npm run build:wasm`（前置条件 `rustup target add wasm32-unknown-unknown`）。产物已入库，普通开发不需要安装 Rust
+- `npm run verify:dds`：用微软 texconv 重新生成各格式 DDS 并逐字节比对解码结果，需要本机装有 texconv（`--texconv` 指定路径）。CI 不跑它——CI 跑的是 `test/dds-fixtures.test.js`，直接读入库的固件，无需 texconv
 
 ## 后续规划
 - `EXR` 等更多格式支持（可复用现有 wasm 通道，需评估 crate 体积）

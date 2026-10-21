@@ -21,7 +21,8 @@
     "coverage": "node --test --experimental-test-coverage --test-reporter=tap \"test/**/*.test.js\"",
     "serve": "node scripts/serve.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "build:wasm": "node scripts/build-wasm.mjs"
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "verify:dds": "node scripts/verify-dds.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
