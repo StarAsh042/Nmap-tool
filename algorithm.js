@@ -20,6 +20,13 @@
     var MAX_PIXELS = 33554432;
 
     /**
+     * 逐字节版本的通道映射，是 mapRows 的参考实现与降级路径。
+     *
+     * 保留这份实现有两个理由：
+     *   1. 缓冲不满足字级快路径的前提（小端序、4 字节对齐）时，由它兜底；
+     *   2. 它是 mapRows 的语义基准——任何快路径都必须与它逐字节相同。
+     * 因此本函数不得为「优化」而修改循环结构。
+     *
      * 对 [startRow, endRow) 行区间执行通道映射，结果写入 dst。
      *
      * 映射规则（与 README 保持一致，禁止为「优化」而合并或跳过）：
@@ -38,7 +45,7 @@
      * @param {number} endRow 结束行（不含）
      * @returns {number} 实际处理到的结束行
      */
-    function mapRows(src, dst, width, startRow, endRow) {
+    function mapRowsBytes(src, dst, width, startRow, endRow) {
         for (var y = startRow; y < endRow; y++) {
             var base = y * width * 4;
             for (var x = 0; x < width; x++) {
@@ -53,6 +60,101 @@
             }
         }
         return endRow;
+    }
+
+    /**
+     * 本机字节序是否为小端。
+     *
+     * 字级路径依赖 RGBA 在 32 位字内的排列顺序（小端下 R 在最低字节）。
+     * 大端机器上同一份位运算会得到相反的通道排列，因此必须先探测再决定走哪条路。
+     * 主流平台全是小端，这段代码实际上永远走快路径；但"实际上"不等于"保证"。
+     */
+    var LITTLE_ENDIAN = (function () {
+        var probe = new Uint32Array(1);
+        probe[0] = 1;
+        return new Uint8Array(probe.buffer)[0] === 1;
+    })();
+
+    /**
+     * 判断两个缓冲能否安全地以 Uint32Array 视图访问。
+     *
+     * 四个前提缺一不可，任何一条不满足都必须退回逐字节实现：
+     *   1. 小端序——否则通道位序是反的；
+     *   2. 长度是 4 的倍数——否则最后会残留不足一个像素的尾巴；
+     *   3. byteOffset 是 4 的倍数——否则 Uint32Array 构造直接抛 RangeError；
+     *   4. 长度足以覆盖 [0, endRow) 行——否则越界读出的 undefined 在两条路径上
+     *      会被转换成不同的字节（逐字节路径写 0，字级路径按位运算算出别的值），
+     *      这不会崩溃，但会悄悄产生不一致的结果。
+     *
+     * @param {Uint8ClampedArray} src
+     * @param {Uint8ClampedArray} dst
+     * @param {number} width
+     * @param {number} endRow
+     * @returns {boolean}
+     */
+    function canUseWordView(src, dst, width, endRow) {
+        if (!LITTLE_ENDIAN) return false;
+        if (!src || !dst || !src.buffer || !dst.buffer) return false;
+        if ((src.length & 3) !== 0 || (dst.length & 3) !== 0) return false;
+        if ((src.byteOffset & 3) !== 0 || (dst.byteOffset & 3) !== 0) return false;
+        var needed = endRow * width * 4;
+        return src.length >= needed && dst.length >= needed;
+    }
+
+    /**
+     * 字级快路径：一次读出一个像素（32 位字），一次写回。
+     *
+     * 与逐字节版本的区别只在"搬运方式"：逐字节版本每个像素要做 4 次读、4 次写，
+     * 字级版本各做 1 次。计算结果完全相同——赋值给 Uint32Array 时引擎会按
+     * ToUint32 语义截断，所以负的 int32（例如 a=255 时的 a<<24）会正确落成
+     * 0xFF000000，不需要额外的无符号转换。
+     *
+     * 调用前必须已通过 canUseWordView 的检查。
+     *
+     * @param {Uint8ClampedArray} src
+     * @param {Uint8ClampedArray} dst
+     * @param {number} width
+     * @param {number} startRow
+     * @param {number} endRow
+     * @returns {number} 实际处理到的结束行
+     */
+    function mapRowsWords(src, dst, width, startRow, endRow) {
+        var s = new Uint32Array(src.buffer, src.byteOffset, src.length >>> 2);
+        var d = new Uint32Array(dst.buffer, dst.byteOffset, dst.length >>> 2);
+        for (var y = startRow; y < endRow; y++) {
+            var base = y * width;
+            for (var x = 0; x < width; x++) {
+                var i = base + x;
+                var w = s[i];
+                var r = w & 255;              // 字节 0
+                var g = (w >>> 8) & 255;      // 字节 1
+                var a = w >>> 24;             // 字节 3
+                // 小端下 32 位字的字节布局是 [R, G, B, A]（R 在最低字节），
+                // 所以目标字的排列是：最低字节放 A、次低放 255-G、再次放 R、最高放 255。
+                d[i] = (255 << 24) | (r << 16) | ((255 - g) << 8) | a;
+            }
+        }
+        return endRow;
+    }
+
+    /**
+     * 对 [startRow, endRow) 行区间执行通道映射，结果写入 dst。
+     *
+     * 满足字级前提时走快路径，否则退回逐字节实现，两者结果逐字节相同。
+     * 调用方（worker.js / script.js）无需感知走了哪条路。
+     *
+     * @param {Uint8ClampedArray} src
+     * @param {Uint8ClampedArray} dst
+     * @param {number} width
+     * @param {number} startRow
+     * @param {number} endRow
+     * @returns {number} 实际处理到的结束行
+     */
+    function mapRows(src, dst, width, startRow, endRow) {
+        if (canUseWordView(src, dst, width, endRow)) {
+            return mapRowsWords(src, dst, width, startRow, endRow);
+        }
+        return mapRowsBytes(src, dst, width, startRow, endRow);
     }
 
     /**
@@ -163,6 +265,10 @@
     }
 
     /**
+     * 逐字节版本的单通道提取，是 extractChannelRows 的参考实现与降级路径。
+     *
+     * 与 mapRowsBytes 同理：不可为「优化」改动循环结构，快路径必须与它逐字节相同。
+     *
      * 对 [startRow, endRow) 行区间提取单个通道，结果写入 dst。
      *
      * 显示模式：
@@ -180,7 +286,7 @@
      * @param {{channel?: string, mode?: string}} [options] 通道与显示模式，缺省为 R + gray
      * @returns {number} 实际处理到的结束行
      */
-    function extractChannelRows(src, dst, width, startRow, endRow, options) {
+    function extractChannelRowsBytes(src, dst, width, startRow, endRow, options) {
         var opts = normalizeChannelOptions(options);
         var offset = opts.offset;
         var tinted = opts.mode === 'rgb' && opts.key !== 'A';
@@ -203,6 +309,82 @@
             }
         }
         return endRow;
+    }
+
+    /**
+     * 字级快路径：单通道提取。
+     *
+     * 与逐字节版本的差别有两处：搬运次数从 4 读 4 写降到 1 读 1 写；
+     * 以及把「是否着色」的判断挪到循环之外——逐字节版本每个像素都要判一次
+     * tinted，这里拆成两条各自无分支的循环。
+     *
+     * 着色模式下只点亮一个颜色通道，因此只需把通道值移到对应字节：
+     * R 在字节 0、G 在字节 1、B 在字节 2。A 没有对应原色，由调用方按灰度处理。
+     *
+     * 调用前必须已通过 canUseWordView 的检查。
+     *
+     * @param {Uint8ClampedArray} src
+     * @param {Uint8ClampedArray} dst
+     * @param {number} width
+     * @param {number} startRow
+     * @param {number} endRow
+     * @param {number} offset 通道字节偏移（R=0 G=1 B=2 A=3）
+     * @param {boolean} tinted 是否按原色着色
+     * @returns {number} 实际处理到的结束行
+     */
+    function extractChannelRowsWords(src, dst, width, startRow, endRow, offset, tinted) {
+        var s = new Uint32Array(src.buffer, src.byteOffset, src.length >>> 2);
+        var d = new Uint32Array(dst.buffer, dst.byteOffset, dst.length >>> 2);
+        var shift = offset * 8;
+        var y, base, x, i, v;
+
+        if (!tinted) {
+            // 灰度：通道值同时写入 R/G/B 三个字节，A 恒为 255
+            for (y = startRow; y < endRow; y++) {
+                base = y * width;
+                for (x = 0; x < width; x++) {
+                    i = base + x;
+                    v = (s[i] >>> shift) & 255;
+                    d[i] = (255 << 24) | (v << 16) | (v << 8) | v;
+                }
+            }
+            return endRow;
+        }
+
+        // 着色：只把通道值放进它自己的字节，其余两色置 0
+        for (y = startRow; y < endRow; y++) {
+            base = y * width;
+            for (x = 0; x < width; x++) {
+                i = base + x;
+                v = (s[i] >>> shift) & 255;
+                d[i] = (255 << 24) | (v << shift);
+            }
+        }
+        return endRow;
+    }
+
+    /**
+     * 对 [startRow, endRow) 行区间提取单个通道，结果写入 dst。
+     *
+     * 满足字级前提时走快路径，否则退回逐字节实现，两者结果逐字节相同。
+     * 参数校验在任何一条路径之前完成：非法 options 一律抛错，
+     * 不会因为走了快路径就跳过校验。
+     *
+     * @param {Uint8ClampedArray} src 源像素（RGBA）
+     * @param {Uint8ClampedArray} dst 目标像素（与 src 等长）
+     * @param {number} width 图片宽度（像素）
+     * @param {number} startRow 起始行（含）
+     * @param {number} endRow 结束行（不含）
+     * @param {{channel?: string, mode?: string}} [options] 通道与显示模式，缺省为 R + gray
+     * @returns {number} 实际处理到的结束行
+     */
+    function extractChannelRows(src, dst, width, startRow, endRow, options) {
+        if (canUseWordView(src, dst, width, endRow)) {
+            var opts = normalizeChannelOptions(options);
+            var tinted = opts.mode === 'rgb' && opts.key !== 'A';
+            return extractChannelRowsWords(src, dst, width, startRow, endRow, opts.offset, tinted);
+        }
+        return extractChannelRowsBytes(src, dst, width, startRow, endRow, options);
     }
 
     /**
