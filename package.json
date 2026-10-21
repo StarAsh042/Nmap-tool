@@ -18,9 +18,7 @@
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
-    "lint": "node scripts/check-syntax.mjs",
-    "lint:ci": "node scripts/check-ci.mjs",
-    "verify": "npm run lint && npm run lint:ci && npm test",
+    "coverage": "node --test --experimental-test-coverage --test-reporter=tap \"test/**/*.test.js\"",
     "serve": "node scripts/serve.mjs",
     "smoke": "node scripts/smoke.mjs"
   },

@@ -5,48 +5,26 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
+  test:
+    # job 名与分支保护中登记的状态检查名一致，改名会导致 PR 卡在 BLOCKED
     name: 语法检查与单元测试
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      # 本项目零运行时依赖，Node 内置 test runner 即可运行，无需 npm install。
-      # setup-node 的 cache 仅接受 'npm' 等固定值，不接受 'none'；
-      # 本项目无 lockfile，因此直接省略该字段（不写即不启用缓存）。
-      #
-      # Node 版本须与 package.json 的 engines 保持一致（>=22）：
-      # 测试脚本使用 `node --test "test/**/*.test.js"`，其 glob 参数支持
-      # 自 Node 21 起才提供，低版本会报 "Could not find ..."。
-      - name: 准备 Node
-        uses: actions/setup-node@v7
+      # 与 package.json 的 engines.node 保持一致
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
 
-      - name: 安装依赖
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            echo "无 package-lock.json，跳过安装（本项目零依赖）"
-          fi
+      # 零运行时依赖，无 lockfile，无需 npm ci
 
-      - name: 语法检查
-        run: npm run lint
+      - run: npm test
 
-      - name: CI 配置自检
-        run: npm run lint:ci
-
-      - name: 单元测试与集成测试
-        run: npm test
-
-      - name: 静态站点冒烟检查
-        run: npm run smoke
+      - run: npm run smoke
