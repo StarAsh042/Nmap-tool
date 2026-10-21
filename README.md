@@ -125,6 +125,7 @@ FixNormalMapChannel/
 ├── tex_ss_5027_bs_face_n.png  # 示例法线贴图
 ├── FixNormalMapChannel.png    # README 配图
 ├── LICENSE
+├── CHANGELOG.md     # 版本变更记录
 └── README.md
 ```
 
