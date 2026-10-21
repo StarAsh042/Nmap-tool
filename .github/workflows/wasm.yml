@@ -1,0 +1,63 @@
+name: WASM
+
+# 只在解码器相关文件变动时触发。
+# 拆成独立 workflow 而不是塞进 ci.yml：Rust 编译要两三分钟，
+# 而绝大多数改动（样式、交互、文档）跟它无关，不该为此等待。
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'crates/**'
+      - 'vendor/**'
+      - 'scripts/build-wasm.mjs'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/wasm.yml'
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'crates/**'
+      - 'vendor/**'
+      - 'scripts/build-wasm.mjs'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/wasm.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 解码器测试与产物校验
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 工具链版本由 rust-toolchain.toml 固定，wasm32 目标会自动安装。
+      # 不锁版本的话，CI 编译出的产物必然与入库产物字节不同，
+      # 下面那步「产物与源码一致」会永远报警。
+      - name: 显示工具链版本
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Rust 单元测试
+        run: cargo test --manifest-path crates/tga-decoder/Cargo.toml
+
+      - name: 重建 wasm 产物
+        run: node scripts/build-wasm.mjs
+
+      # 改了 Rust 却忘了重新编译，产物就会和源码脱节：
+      # 测试全绿，线上跑的却还是旧逻辑。
+      #
+      # 这里比对的是「源码指纹」而不是 wasm 字节。原因：同一份源码在 Windows 与
+      # Linux 上编译出的 wasm 并不逐字节相同（实测 77946 vs 77914 字节，rustc
+      # 版本一致），比字节会让本检查永远报警。指纹跨平台稳定，同样能抓住
+      # 「改了源码没重编」这个真正要防的问题。
+      - name: 校验产物与源码一致
+        run: |
+          if ! git diff --exit-code --stat -- vendor/tga-decoder.source.sha256; then
+            echo ""
+            echo "::error::Rust 源码已变更但 wasm 产物未重新编译，请运行 npm run build:wasm 并提交 vendor/"
+            exit 1
+          fi
+          echo "产物与源码一致"

@@ -32,8 +32,12 @@
     /* 进度文案的最小更新间隔，避免高频刷新 */
     var LABEL_THROTTLE_MS = 120;
 
-    /* 浏览器无法解码、但用户常会尝试拖动进来的扩展名 */
-    var UNSUPPORTED_EXTENSIONS = ['tga', 'exr', 'dds', 'hdr', 'psd', 'tif', 'tiff'];
+    /* 浏览器无法解码、但用户常会尝试拖动进来的扩展名。
+       tga 已通过 wasm 解码器支持，不在此列。 */
+    var UNSUPPORTED_EXTENSIONS = ['exr', 'dds', 'hdr', 'psd', 'tif', 'tiff'];
+
+    /* 需要走 wasm 解码器的扩展名 */
+    var WASM_EXTENSIONS = ['tga'];
 
     /* 浮层过渡时长，与 CSS 中 --dur 保持一致 */
     var OVERLAY_TRANSITION_MS = 200;
@@ -458,13 +462,39 @@
             });
         }
 
+        /** 取文件扩展名（小写，不含点）；无扩展名时返回空串 */
+        function extensionOf(name) {
+            var parts = String(name || '').split('.');
+            return parts.length > 1 ? parts.pop().toLowerCase() : '';
+        }
+
         function decodeImage(file) {
+            if (WASM_EXTENSIONS.indexOf(extensionOf(file.name)) >= 0) {
+                return decodeWithWasm(file);
+            }
             if (typeof createImageBitmap === 'function') {
                 return createImageBitmap(file).catch(function () {
                     return decodeWithObjectURL(file);
                 });
             }
             return decodeWithObjectURL(file);
+        }
+
+        /**
+         * 用 wasm 解码浏览器不支持的格式（当前只有 TGA）。
+         *
+         * 返回的 ImageData 与 ImageBitmap 不同：它不能 drawImage，但可以直接
+         * putImageData，省掉一次「先合成到画布再读回来」的搬运。
+         * applySource 会按类型分派。
+         */
+        function decodeWithWasm(file) {
+            if (!self.NormalMapTga || !self.NormalMapTga.isSupported()) {
+                return Promise.reject(new Error('当前浏览器不支持 WebAssembly'));
+            }
+            setStatus('busy', '正在解码 ' + (file.name || '文件') + ' …');
+            return self.NormalMapTga.decode(file, Algo.MAX_PIXELS).then(function (decoded) {
+                return new ImageData(decoded.data, decoded.width, decoded.height);
+            });
         }
 
         function decodeWithObjectURL(file) {
@@ -521,7 +551,12 @@
                 el.originalCanvas.width = w;
                 el.originalCanvas.height = h;
                 ctxOriginal.clearRect(0, 0, w, h);
-                ctxOriginal.drawImage(source, 0, 0);
+                if (isRawImageData(source)) {
+                    // wasm 解码出来的裸像素：直接铺到画布，不必再走一次绘制
+                    ctxOriginal.putImageData(source, 0, 0);
+                } else {
+                    ctxOriginal.drawImage(source, 0, 0);
+                }
             } catch (err) {
                 releaseSource(source);
                 failLoad('无法绘制到画布：' + describeError(err) + '。图片可能超过浏览器画布上限。');
@@ -576,10 +611,17 @@
             setStatus('error', message);
         }
 
+        /** 判断解码结果是不是裸像素（wasm 解码器产出），而非可绘制的位图 */
+        function isRawImageData(source) {
+            return typeof ImageData !== 'undefined' && source instanceof ImageData;
+        }
+
         function buildDecodeErrorMessage(file, err) {
-            var name = (file && file.name) || '';
-            var parts = name.split('.');
-            var ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
+            var ext = extensionOf(file && file.name);
+            if (WASM_EXTENSIONS.indexOf(ext) >= 0) {
+                return '.' + ext + ' 解码失败（' + describeError(err) + '）。请确认文件未损坏，' +
+                    '或先转换为 PNG 再导入。';
+            }
             if (UNSUPPORTED_EXTENSIONS.indexOf(ext) >= 0) {
                 return '浏览器无法解码 .' + ext + ' 文件，请先转换为 PNG 或 JPEG 再导入。';
             }

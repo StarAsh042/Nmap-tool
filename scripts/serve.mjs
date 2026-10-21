@@ -26,6 +26,9 @@ const MIME = {
   '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml',
   '.webp': 'image/webp',
+  // wasm 必须用 application/wasm：否则 instantiateStreaming 会拒绝，
+  // 部分浏览器的缓存策略也会因此退化
+  '.wasm': 'application/wasm',
 };
 
 createServer(async (req, res) => {

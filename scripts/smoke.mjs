@@ -179,6 +179,25 @@ try {
   notes.push('script.js 尚未提交，跳过 Worker 引用检查');
 }
 
+// ---- 5. wasm 产物存在性 ----
+// 这两个文件不由 HTML 直接引用，而是 tga-decoder.js 在运行时按路径加载，
+// 上面的引用检查覆盖不到。少了它们页面照常打开，只有导入 TGA 时才失败，
+// 属于最容易被忽略的一类断链，所以单独校验。
+const WASM_ASSETS = ['vendor/tga-decoder.wasm', 'vendor/tga-decoder-b64.js'];
+for (const rel of WASM_ASSETS) {
+  try {
+    const buf = await readFile(join(ROOT, rel));
+    if (buf.length === 0) throw new Error('文件为空');
+    if (rel.endsWith('.wasm') && buf.readUInt32LE(0) !== 0x6d736100) {
+      throw new Error('不是合法的 wasm（魔数不匹配）');
+    }
+    console.log(`  ok  ${rel} 可用（${(buf.length / 1024).toFixed(1)} KB）`);
+  } catch (err) {
+    errors.push(`${rel} 不可用：${err.message}`);
+    console.error(`fail  ${rel} 不可用`);
+  }
+}
+
 for (const note of notes) {
   console.log(`note  ${note}`);
 }

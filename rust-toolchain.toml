@@ -1,0 +1,11 @@
+# 固定 Rust 工具链版本。
+#
+# 存在的理由：vendor/ 里的 wasm 产物是用某个具体版本编译出来的。
+# 如果 CI 用另一个版本重建，产物字节会不同，「产物与源码一致」这项检查
+# 就会永远报警。锁定版本后，本地与 CI 编译出同样的结果。
+#
+# targets 会在首次使用时自动安装，无需手动 rustup target add。
+[toolchain]
+channel = "1.99.0"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

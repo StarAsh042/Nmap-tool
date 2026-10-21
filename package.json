@@ -20,7 +20,8 @@
     "test": "node --test \"test/**/*.test.js\"",
     "coverage": "node --test --experimental-test-coverage --test-reporter=tap \"test/**/*.test.js\"",
     "serve": "node scripts/serve.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "build:wasm": "node scripts/build-wasm.mjs"
   },
   "engines": {
     "node": ">=22.0.0"

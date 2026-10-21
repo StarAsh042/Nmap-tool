@@ -12,6 +12,9 @@ tmp/
 dist/
 build/
 
+# Rust 构建产物（编译好的 wasm 另存到 vendor/，target/ 不入库）
+target/
+
 # 环境变量（严禁提交任何凭据）
 .env
 .env.*

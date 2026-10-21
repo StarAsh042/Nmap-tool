@@ -1,0 +1,21 @@
+[package]
+name = "tga-decoder"
+version = "0.1.0"
+edition = "2021"
+description = "TGA 解码器（编译为 WebAssembly，供 ChannelFixer 使用）"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 只开 tga 特性：默认特性会带上 png/jpeg 等解码器，体积翻几倍且本项目用不到
+image = { version = "0.25.10", default-features = false, features = ["tga"] }
+
+[profile.release]
+opt-level = "s"      # 优化体积而非极限速度：解码不是热点，体积才是
+lto = true
+codegen-units = 1
+panic = "abort"      # 不展开 panic，省掉一堆用于格式化的代码
+strip = true

@@ -64,7 +64,8 @@ http://localhost:8000/
 
 ## 支持格式
 - 浏览器原生可解码的图片格式：`PNG`, `JPEG`, `WebP`, `GIF`, `BMP`, `AVIF`
-- `TGA` / `EXR` / `DDS` 等浏览器不支持解码的格式会被明确拒绝，并提示先转换为 PNG 或 JPEG
+- `TGA`：由内置的 WebAssembly 解码器处理，覆盖未压缩与 RLE 压缩、24/32 位真彩色、15/16 位（5-5-5）、8 位灰度与灰度+alpha、色表索引（8/16 位索引，15/16/24/32 位表项）
+- `EXR` / `DDS` 等仍不支持解码的格式会被明确拒绝，并提示先转换为 PNG 或 JPEG
 - 处理上限：单张图片像素总量约 3355 万（≈ 8192 × 4096），单文件 150MB；超限会给出可读提示而非卡死
 
 ## 使用须知
@@ -76,6 +77,7 @@ http://localhost:8000/
 - 使用 `Canvas 2D` 进行逐像素处理与预览
 - 使用 `Web Worker` 承担逐像素计算，配合 `Transferable` 零拷贝传输；不可用时自动降级为主线程分片
 - 导出使用 `canvas.toBlob` + `URL.createObjectURL`，不产生 base64 体积膨胀
+- `TGA` 由 Rust 编译的 `WebAssembly` 解码器处理，仅在真的导入 TGA 时才加载
 - 字体使用本地优先字体栈（`Inter` / `system-ui` / `PingFang SC` / `Microsoft YaHei`），**无任何外部请求**，离线可用
 
 ### 逐像素处理为什么按 32 位读写
@@ -92,6 +94,16 @@ http://localhost:8000/
 
 逐字节实现保留在 `algorithm.js` 中，它同时承担两个职责：降级路径，以及等价测试的对照物。`test/algorithm-parity.test.js` 里另有一份照本文档规则独立写出的参考实现，用来确认快路径没有改变任何输出。
 
+### TGA 为什么用 WebAssembly 而不是手写 JS
+
+浏览器的图片解码 API 不支持 TGA。手写一个解析器要覆盖未压缩与 RLE、8/16/24/32 位色深、灰度、色表索引、原点翻转等组合，每一条都可能藏 bug，而这类 bug 表现为「图能显示但数值不对」，比直接报错更难发现。
+
+所以改用 Rust 的 `image` crate 解码，编译成 wasm（76 KB）。它只在用户真的导入 `.tga` 时才加载，普通 PNG 用户不会为它付出任何下载成本。
+
+**为什么不用 wasm 加速逐像素处理**：实测 Rust 纯计算确实比 JS 快，但真实路径要把整幅图拷进 wasm 线性内存再拷出来，8K 图就是 256MB 搬运，总耗时只快约 8%。瓶颈在内存带宽，不在计算，不值得为此引入构建链。wasm 用在这里是因为「浏览器不会做的事」必须有人做，不是因为「能做得更快」。
+
+产物由 `crates/tga-decoder/` 编译而来，已随仓库提交，克隆下来无需安装 Rust 即可运行。需要重新编译时执行 `npm run build:wasm`（前置条件：`rustup target add wasm32-unknown-unknown`）。
+
 ## 项目结构
 ```
 FixNormalMapChannel/
@@ -100,6 +112,11 @@ FixNormalMapChannel/
 ├── algorithm.js      # 算法层：通道映射、单通道提取与通道信息判定（无 DOM 依赖）
 ├── worker.js         # 执行层：后台线程分片计算
 ├── script.js         # 交互层：状态机、任务调度、历史记录、导出
+├── tga-decoder.js    # 解码层：wasm 加载与数据搬运（file:// 下走内联 base64）
+├── vendor/           # wasm 产物（已编译入库，克隆即用）
+├── crates/tga-decoder/  # wasm 解码器的 Rust 源码
+├── scripts/          # 静态服务器、冒烟检查、wasm 构建脚本
+├── test/             # 单元测试、等价测试、wasm 集成测试、DOM 垫片
 ├── tex_ss_5027_bs_face_n.png  # 示例法线贴图
 ├── FixNormalMapChannel.png    # README 配图
 ├── LICENSE
@@ -125,9 +142,10 @@ FixNormalMapChannel/
 ## 开发与部署
 - 静态部署到任意静态托管平台（GitHub Pages、Netlify、Vercel 等）
 - 或本地运行任意静态服务器（如 `http-server`, `python -m http.server`）
+- 修改了 `crates/tga-decoder/` 之后需要重新编译产物：`npm run build:wasm`（前置条件 `rustup target add wasm32-unknown-unknown`）。产物已入库，普通开发不需要安装 Rust
 
 ## 后续规划
-- `TGA`/`EXR` 等更多格式支持（需要引入解码器，届时会带来体积与许可成本）
+- `EXR` / `DDS` 等更多格式支持（可复用现有 wasm 通道，需评估 crate 体积）
 - 批量处理与队列导出
 - 键盘快捷键与完整的无障碍支持
 
