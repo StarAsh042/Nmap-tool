@@ -203,6 +203,7 @@
             });
 
             window.addEventListener('beforeunload', function () {
+                historyItems.forEach(releaseEntry);
                 historyItems = [];
             });
         }
@@ -429,6 +430,7 @@
 
             decodeImage(file).then(function (source) {
                 if (!source || !source.width || !source.height) {
+                    releaseSource(source);
                     throw new Error('图片尺寸无效');
                 }
                 applySource(source, file, note);
@@ -462,6 +464,16 @@
             });
         }
 
+        function releaseSource(source) {
+            if (source && typeof source.close === 'function') {
+                try {
+                    source.close();
+                } catch (err) {
+                    /* 忽略：部分实现不支持 close */
+                }
+            }
+        }
+
         function applySource(source, file, note) {
             var w = source.width;
             var h = source.height;
@@ -477,6 +489,7 @@
 
             // 超限时不再分配画布内存（避免在已经很大的图上再叠一份缓冲）
             if (overLimit) {
+                releaseSource(source);
                 if (el.originalRes) {
                     el.originalRes.textContent = formatSize(w, h);
                 }
@@ -491,9 +504,11 @@
                 ctxOriginal.clearRect(0, 0, w, h);
                 ctxOriginal.drawImage(source, 0, 0);
             } catch (err) {
+                releaseSource(source);
                 failLoad('无法绘制到画布：' + describeError(err) + '。图片可能超过浏览器画布上限。');
                 return;
             }
+            releaseSource(source);
 
             if (el.originalRes) {
                 el.originalRes.textContent = formatSize(w, h);
