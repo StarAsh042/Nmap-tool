@@ -1,0 +1,10 @@
+# 该文件为有意提交的配置，不要加入 .gitignore。
+# 推荐扩展：ESLint、Prettier、GitHub Actions。
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "github.vscode-github-actions"
+  ],
+  "unwantedRecommendations": []
+}
