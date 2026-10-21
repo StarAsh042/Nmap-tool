@@ -1,0 +1,29 @@
+{
+  "name": "fix-normal-map-channel",
+  "version": "1.0.0",
+  "description": "ChannelFixer · 纯前端法线贴图通道修复工具（无运行时依赖）",
+  "private": true,
+  "license": "MIT",
+  "author": "StarAsh042",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/StarAsh042/FixNormalMapChannel.git"
+  },
+  "keywords": [
+    "normal-map",
+    "channel",
+    "canvas",
+    "web-worker",
+    "frontend"
+  ],
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "lint": "node scripts/check-syntax.mjs",
+    "verify": "npm run lint && npm test",
+    "serve": "node scripts/serve.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
