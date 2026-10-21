@@ -83,6 +83,12 @@ jobs:
     name: security
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # rustsec/audit-check 要把扫描结果写成 check run，需要 checks: write。
+    # 只给这一个 job——审计结果必须能落在提交上才有意义，
+    # 但其他 job 不需要任何写权限。
+    permissions:
+      contents: read
+      checks: write
 
     steps:
       # gitleaks 需要完整历史才能判断提交里是否引入过密钥
