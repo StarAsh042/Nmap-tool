@@ -28,6 +28,9 @@
     /* 进度文案的最小更新间隔，避免高频刷新 */
     var LABEL_THROTTLE_MS = 120;
 
+    /* 浏览器无法解码、但用户常会尝试拖动进来的扩展名 */
+    var UNSUPPORTED_EXTENSIONS = ['tga', 'exr', 'dds', 'hdr', 'psd', 'tif', 'tiff'];
+
     /* 浮层过渡时长，与 CSS 中 --dur 保持一致 */
     var OVERLAY_TRANSITION_MS = 200;
 
@@ -435,7 +438,7 @@
                 }
                 applySource(source, file, note);
             }).catch(function (err) {
-                failLoad('无法解码该图片（' + describeError(err) + '）。请确认文件是完整的 PNG / JPEG / WebP 等常见格式。');
+                failLoad(buildDecodeErrorMessage(file, err));
             });
         }
 
@@ -555,6 +558,16 @@
             setWaiting(false);
             setLabel('等待处理');
             setStatus('error', message);
+        }
+
+        function buildDecodeErrorMessage(file, err) {
+            var name = (file && file.name) || '';
+            var parts = name.split('.');
+            var ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
+            if (UNSUPPORTED_EXTENSIONS.indexOf(ext) >= 0) {
+                return '浏览器无法解码 .' + ext + ' 文件，请先转换为 PNG 或 JPEG 再导入。';
+            }
+            return '无法解码该图片（' + describeError(err) + '）。请确认文件是完整的 PNG / JPEG / WebP 等常见格式。';
         }
 
         /* ====================================================================
@@ -915,6 +928,7 @@
         function outputName() {
             var base = sourceInfo && sourceInfo.name ? sourceInfo.name : 'image';
             base = base.replace(/\.[^./\\]+$/, '');
+            base = base.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_');
             if (!base) {
                 base = 'image';
             }
