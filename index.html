@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="法线贴图通道修复工具：绿通道取反、红通道取透明通道、蓝通道取原红通道，纯前端本地处理，图片不会上传。">
+    <title>ChannelFixer · 法线贴图通道修复工具</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='1' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%233b82f6'/%3E%3Cstop offset='1' stop-color='%23a78bfa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='%230f172a'/%3E%3Crect x='8' y='9' width='4' height='14' rx='2' fill='url(%23g)'/%3E%3Crect x='14' y='9' width='4' height='14' rx='2' fill='url(%23g)' opacity='.72'/%3E%3Crect x='20' y='9' width='4' height='14' rx='2' fill='url(%23g)' opacity='.45'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="brand">
+                <h1 class="brand-title">Channel<span class="brand-highlight">Fixer</span></h1>
+                <p class="brand-subtitle">法线贴图通道修复工具 · 纯本地处理，图片不会上传</p>
+            </div>
+            <div class="status-pill" id="statusPill" data-level="idle">
+                <span class="status-pill-dot" aria-hidden="true"></span>
+                <span id="statusPillText">等待导入</span>
+            </div>
+        </header>
+
+        <div class="layout">
+            <aside class="left-pane">
+                <section class="panel upload-section" id="dropZone">
+                    <input type="file" id="fileInput" accept="image/png, image/jpeg, image/webp, image/gif, image/bmp, image/avif" aria-label="选择要修复的图片">
+                    <div class="upload-content">
+                        <span class="upload-icon-wrap" aria-hidden="true">
+                            <svg class="upload-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                        </span>
+                        <p class="upload-title">点击选择图片，或拖拽到这里</p>
+                        <p class="upload-hint">支持 PNG / JPEG / WebP 等浏览器可解码格式，拖到页面任意位置均可</p>
+                        <span class="file-info" id="fileName">未选择文件</span>
+                    </div>
+                </section>
+
+                <section class="panel history" aria-labelledby="historyTitle">
+                    <div class="history-header">
+                        <h2 id="historyTitle">历史记录</h2>
+                        <button id="clearHistoryBtn" class="btn ghost-btn" type="button" disabled>清空</button>
+                    </div>
+                    <div id="historyList" class="history-list"></div>
+                    <p class="empty-hint" id="historyEmpty">还没有修复记录，处理完成后会出现在这里</p>
+                </section>
+            </aside>
+
+            <section class="center-pane">
+                <div class="controls" role="group" aria-label="操作">
+                    <button id="fixBtn" class="btn primary-btn" type="button" disabled>
+                        <svg class="btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path>
+                        </svg>
+                        <span>开始修复</span>
+                    </button>
+                    <button id="downloadBtn" class="btn secondary-btn" type="button" disabled>
+                        <svg class="btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        </svg>
+                        <span>下载结果</span>
+                    </button>
+                </div>
+
+                <div class="preview-container">
+                    <article class="panel preview-card">
+                        <div class="card-header">
+                            <span class="badge original">Original</span>
+                            <span class="res-info" id="originalRes"></span>
+                        </div>
+                        <div class="canvas-wrapper" id="originalWrap" title="点击放大查看原尺寸">
+                            <canvas id="originalCanvas"></canvas>
+                            <div class="empty-state" id="originalEmpty">等待图片导入…</div>
+                            <span class="channel-badge" id="originalChannels"></span>
+                        </div>
+                    </article>
+
+                    <article class="panel preview-card">
+                        <div class="card-header">
+                            <span class="badge processed">Fixed</span>
+                            <span class="res-info" id="fixedRes"></span>
+                        </div>
+                        <div class="canvas-wrapper" id="fixedWrap" title="点击放大查看原尺寸">
+                            <canvas id="processedCanvas"></canvas>
+                            <div class="empty-state" id="fixedEmpty">等待处理…</div>
+                            <span class="channel-badge" id="fixedChannels"></span>
+                        </div>
+                    </article>
+                </div>
+
+                <section class="panel progress" aria-labelledby="progressTitle">
+                    <div class="progress-head">
+                        <span class="progress-title" id="progressTitle">生成进度</span>
+                        <span class="progress-label" id="progressLabel">等待处理</span>
+                    </div>
+                    <div class="progress-track" id="progressTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="处理进度">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <p class="status-message is-info" id="statusMessage" role="status" aria-live="polite">导入一张法线贴图后即可开始修复。</p>
+                </section>
+            </section>
+        </div>
+    </div>
+
+    <div class="overlay" id="previewOverlay" hidden>
+        <div class="overlay-backdrop" data-action="close-preview"></div>
+        <div class="overlay-panel" role="dialog" aria-modal="true" aria-labelledby="overlayTitle">
+            <div class="overlay-head">
+                <span class="overlay-title" id="overlayTitle">原尺寸预览</span>
+                <span class="overlay-meta" id="overlayMeta"></span>
+                <button class="icon-btn" id="overlayClose" type="button" aria-label="关闭预览">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="overlay-body">
+                <canvas id="overlayCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="algorithm.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
