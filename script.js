@@ -594,6 +594,7 @@
                 setStatus('error', '图片像素总量超出可处理上限，请先缩小图片。');
                 return;
             }
+
             cancelActiveJob();
             clearResult();
 
@@ -917,12 +918,31 @@
             if (appState !== 'done') {
                 return;
             }
-            if (!lastResult || !lastResult.blob) {
-                setStatus('warning', '结果尚未编码完成，请稍候重试。');
+            var name = outputName();
+            if (lastResult && lastResult.blob) {
+                saveBlob(lastResult.blob, name);
+                setStatus('success', '已开始下载 ' + name);
                 return;
             }
-            saveBlob(lastResult.blob, lastResult.name);
-            setStatus('success', '已开始下载 ' + lastResult.name);
+            if (typeof el.processedCanvas.toBlob !== 'function') {
+                setStatus('error', '当前环境不支持导出该画布。');
+                return;
+            }
+            setStatus('busy', '正在编码 PNG…');
+            el.processedCanvas.toBlob(function (blob) {
+                if (!blob) {
+                    setStatus('error', '导出失败：无法编码为 PNG。');
+                    return;
+                }
+                lastResult = {
+                    blob: blob,
+                    name: name,
+                    width: el.processedCanvas.width,
+                    height: el.processedCanvas.height
+                };
+                saveBlob(blob, name);
+                setStatus('success', '已开始下载 ' + name);
+            }, 'image/png');
         }
 
         function outputName() {
