@@ -59,11 +59,39 @@ for (const rel of WORKFLOWS) {
 
   // ---- 检查 3: node-version 应为字符串，避免 YAML 数字被解析成float ----
   const nvMatch = text.match(/node-version:\s*(.+)/);
-  if (nvMatch && !/^['"]/.test(nvMatch[1].trim())) {
-    errors.push(
-      `${rel}: node-version 建议加引号（当前: ${nvMatch[1].trim()}），` +
-      `否则 '20.10' 会被 YAML 解析成数字 20.1。`,
-    );
+  if (nvMatch) {
+    const nv = nvMatch[1].trim();
+    if (!/^['"]/.test(nv)) {
+      errors.push(
+        `${rel}: node-version 建议加引号（当前: ${nv}），` +
+        `否则 '20.10' 会被 YAML 解析成数字 20.1。`,
+      );
+    }
+
+    // ---- 检查 4: CI 的 Node 主版本须与 package.json 的 engines 下限一致 ----
+    // 不一致会导致「本地通过、CI 失败」，且这类差异在本地完全无法察觉。
+    // 注意先剥掉 YAML 引号，否则 '20' 形式的值不会被识别为纯数字。
+    const nvNum = Number(nv.replace(/^['"]|['"]$/g, ''));
+    if (Number.isInteger(nvNum)) {
+      let min = null;
+      try {
+        const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+        const range = pkg.engines && pkg.engines.node;
+        if (range) {
+          const m2 = range.match(/>=\s*(\d+)/);
+          if (m2) min = Number(m2[1]);
+        }
+      } catch {
+        errors.push(`${rel}: 无法读取 package.json 以校验 engines`);
+      }
+      if (min !== null && nvNum < min) {
+        errors.push(
+          `${rel}: CI 使用 Node ${nvNum}，但 package.json 声明 engines.node >=${min}。` +
+          `低版本缺少所需特性（如 node --test 的 glob 参数自 Node 21 起支持），` +
+          `会造成「本地通过、CI 失败」。请将 node-version 提升到 ${min} 或更高。`,
+        );
+      }
+    }
   }
 }
 
