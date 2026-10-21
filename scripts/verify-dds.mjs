@@ -37,11 +37,8 @@ const SOURCE = join(ROOT, 'tex_ss_5027_bs_face_n.png');
 const WIDTH = 64;
 const HEIGHT = 64;
 
-/** 与参照逐字节一致的格式 */
-const EXACT = ['R8G8B8A8', 'BC4', 'BC5', 'BC7'];
-/** 允许 BC1 颜色插值舍入差异 ±1 的格式 */
-const TOLERANT = ['BC1', 'BC2', 'BC3'];
-const MAX_DEVIATION = 1;
+/** 固件覆盖的全部格式，每一种都要求与 texconv 展开结果逐字节一致 */
+const FORMATS = ['R8G8B8A8', 'BC1', 'BC2', 'BC3', 'BC4', 'BC5', 'BC7'];
 
 const args = process.argv.slice(2);
 const regenerate = args.includes('--regenerate');
@@ -96,7 +93,7 @@ async function main() {
     process.exit(2);
   }
 
-  const formats = [...EXACT, ...TOLERANT];
+  const formats = FORMATS;
 
   if (regenerate) {
     console.log(`重新生成固件（${WIDTH}x${HEIGHT}，源图 tex_ss_5027_bs_face_n.png）`);
@@ -139,14 +136,12 @@ async function main() {
       continue;
     }
     const { diff, maxDiff, total, sizeMismatch } = compare(decode(compressedPath), decode(referencePath));
-    const isExact = EXACT.includes(format);
-    const ok = isExact ? diff === 0 : maxDiff <= MAX_DEVIATION;
-    const detail = diff === 0 ? '完全一致' : `差异 ${diff}/${total} 字节，最大偏差 ${maxDiff}`;
+    const ok = diff === 0 && !sizeMismatch;
+    const detail = ok ? '完全一致' : `差异 ${diff}/${total} 字节，最大偏差 ${maxDiff}`;
     console.log(`  ${format.padEnd(9)} ${String(detail).padEnd(28)} ${ok ? '✓' : '✗'}`);
     if (!ok) {
       failed++;
-      if (isExact) console.log(`            ${format} 本应逐字节一致，出现回归`);
-      else console.log(`            ${format} 偏差超过 ${MAX_DEVIATION}，可能是更严重的回归`);
+      console.log(`            ${format} 本应逐字节一致，出现回归`);
     }
   }
 

@@ -156,48 +156,62 @@ fn dxgi_from_fourcc(dds: &Dds) -> Option<DxgiFormat> {
 }
 
 
-/// RGB565 展开成 8 位（位复制）。
-fn rgb565_expand(v: u16) -> (u32, u32, u32) {
-    let r = ((v >> 11) & 31) as u32;
-    let g = ((v >> 5) & 63) as u32;
-    let b = (v & 31) as u32;
-    ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+/// BC1 颜色块的解码，逐行对照 DirectXTex 的 `DecodeBC1` 实现。
+///
+/// 三个容易想当然、但会差 1 的细节（都是照源码来的，不是试出来的）：
+///
+/// 1. **乘倒数常量而不是除**：源码是 `XMVectorMultiply(clr, {1/31, 1/63, 1/31, 1})`。
+///    `v * f32(1/31)` 与 `v / 31` 在浮点下不是同一个数，边界处会差 1。
+/// 2. **先归一化再插值**：`XMVectorLerp` 作用在 0..1 的浮点上，
+///    等价于 `a + t * (b - a)`，全程 f32。
+/// 3. **转 8 位是 `v*255 + 0.5` 再截断**，即四舍五入，不是截断也不是银行家舍入。
+const INV31: f32 = 1.0 / 31.0;
+const INV63: f32 = 1.0 / 63.0;
+
+#[inline]
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + t * (b - a)
+}
+
+#[inline]
+fn to_u8(v: f32) -> u8 {
+    (v * 255.0 + 0.5) as u8
 }
 
 /// BC1/BC2/BC3 共用的颜色块解码。
-///
-/// 不用库的 `decode_bc1_block`：它的插值用截断除法，而 DirectXTex（texconv）
-/// 用四舍五入，逐字节比对时会在 G/B 通道产生 1 的偏差。
 ///
 /// @param use_alpha c0 <= c1 时索引 3 是否为「透明黑」
 fn decode_bc1_color_block(data: &[u8], block: &mut [u32; 16], use_alpha: bool) {
     let c0 = u16::from_le_bytes([data[0], data[1]]);
     let c1 = u16::from_le_bytes([data[2], data[3]]);
-    let (r0, g0, b0) = rgb565_expand(c0);
-    let (r1, g1, b1) = rgb565_expand(c1);
+    let r0 = ((c0 >> 11) & 31) as u32;
+    let g0 = ((c0 >> 5) & 63) as u32;
+    let b0 = (c0 & 31) as u32;
+    let r1 = ((c1 >> 11) & 31) as u32;
+    let g1 = ((c1 >> 5) & 63) as u32;
+    let b1 = (c1 & 31) as u32;
+
+    // 归一化到 0..1（乘预计算倒数，与源码一致）
+    let n0 = [r0 as f32 * INV31, g0 as f32 * INV63, b0 as f32 * INV31];
+    let n1 = [r1 as f32 * INV31, g1 as f32 * INV63, b1 as f32 * INV31];
 
     let mut pal = [[0u8; 4]; 4];
-    pal[0] = [r0 as u8, g0 as u8, b0 as u8, 255];
-    pal[1] = [r1 as u8, g1 as u8, b1 as u8, 255];
-    let opaque0 = c0 > c1;
-    if opaque0 {
-        pal[2] = [
-            ((2 * r0 + r1 + 1) / 3) as u8,
-            ((2 * g0 + g1 + 1) / 3) as u8,
-            ((2 * b0 + b1 + 1) / 3) as u8,
-            255,
-        ];
-        pal[3] = [
-            ((r0 + 2 * r1 + 1) / 3) as u8,
-            ((g0 + 2 * g1 + 1) / 3) as u8,
-            ((b0 + 2 * b1 + 1) / 3) as u8,
-            255,
-        ];
+    pal[0] = [to_u8(n0[0]), to_u8(n0[1]), to_u8(n0[2]), 255];
+    pal[1] = [to_u8(n1[0]), to_u8(n1[1]), to_u8(n1[2]), 255];
+    if c0 > c1 {
+        for (slot, t) in [(2usize, 1.0f32 / 3.0f32), (3usize, 2.0f32 / 3.0f32)] {
+            pal[slot] = [
+                to_u8(lerp_f32(n0[0], n1[0], t)),
+                to_u8(lerp_f32(n0[1], n1[1], t)),
+                to_u8(lerp_f32(n0[2], n1[2], t)),
+                255,
+            ];
+        }
     } else {
         pal[2] = [
-            ((r0 + r1 + 1) / 2) as u8,
-            ((g0 + g1 + 1) / 2) as u8,
-            ((b0 + b1 + 1) / 2) as u8,
+            to_u8(lerp_f32(n0[0], n1[0], 0.5)),
+            to_u8(lerp_f32(n0[1], n1[1], 0.5)),
+            to_u8(lerp_f32(n0[2], n1[2], 0.5)),
             255,
         ];
         pal[3] = [0, 0, 0, if use_alpha { 0 } else { 255 }];
@@ -337,6 +351,29 @@ fn decode_bc3_ours(blocks: &[u8], width: usize, height: usize, out: &mut [u32]) 
     }
 }
 
+
+/// BC2：显式 4 位 alpha + BC1 颜色块。
+///
+/// 布局与 BC3 一样是 **alpha 在前、颜色在后**。alpha 不是插值，是每个像素
+/// 4 位直接给值（0..15 映射到 0..255，即乘 17）。
+fn decode_bc2_ours(blocks: &[u8], width: usize, height: usize, out: &mut [u32]) {
+    let bx_count = width.div_ceil(4);
+    let by_count = height.div_ceil(4);
+    for by in 0..by_count {
+        for bx in 0..bx_count {
+            let off = (by * bx_count + bx) * 16;
+            let mut block = [0u32; 16];
+            decode_bc1_color_block(&blocks[off + 8..off + 16], &mut block, false);
+            for (i, slot) in block.iter_mut().enumerate() {
+                // 每字节装两个像素：偶数像素取低 4 位，奇数取高 4 位
+                let nib = (blocks[off + i / 2] >> ((i % 2) * 4)) & 0x0F;
+                *slot = (*slot & 0x00FF_FFFF) | (((nib as u32) * 17) << 24);
+            }
+            copy_block(bx, by, width, height, &block, out);
+        }
+    }
+}
+
 /// BC1：颜色块，含 1 位透明模式。
 ///
 /// 当块内两个端点满足 c0 <= c1 时，索引 3 表示「透明黑」，DirectXTex 与 DXT1
@@ -438,7 +475,8 @@ fn decode_dds(input: &[u8], max_pixels: u32) -> Option<(Vec<u8>, u32, u32)> {
             true
         }
         DxgiFormat::BC2_UNorm | DxgiFormat::BC2_UNorm_sRGB => {
-            texture2ddecoder::decode_bc2(blocks, w, h, &mut words).is_ok()
+            decode_bc2_ours(blocks, w, h, &mut words);
+            true
         }
         // BC3 / BC4 / BC5 都含 alpha 块，库实现在 wasm32 上会截断索引，
         // 因此走我们自己的实现（见 decode_alpha_block 的说明）
