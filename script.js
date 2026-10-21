@@ -3,12 +3,14 @@
  *
  * 职责：
  *   - 显式状态机（idle / loading / ready / processing / done / error）
+ *   - 任务令牌与取消，消除「处理中导入新图」造成的竞态
+ *   - 执行层调度：Worker 优先，不可用时降级为主线程分片
  *   - 导入本地图片并绘制到原图画布
- *   - 调用 algorithm.js 完成通道映射
  *   - 进度与状态反馈
  *   - 导出修复结果为 PNG
  *
- * 本版本引入显式状态机与可见反馈，处理仍在主线程同步完成。
+ * 本版本引入 Worker 执行层与任务取消机制；file:// 等无法构造 Worker 的
+ * 环境下自动降级为主线程分片处理。
  *
  * 算法实现位于 algorithm.js，本文件不重复实现通道映射。
  */
@@ -16,6 +18,13 @@
     'use strict';
 
     var Algo = window.NormalMapChannel;
+
+    /* 主线程分片参数 */
+    var MAIN_BLOCK_ROWS = 16;
+    var MAIN_BUDGET_MS = 10;
+
+    /* 进度文案的最小更新间隔，避免高频刷新 */
+    var LABEL_THROTTLE_MS = 120;
 
     var STATE_META = {
         idle: { level: 'idle', text: '等待导入' },
@@ -39,6 +48,10 @@
         var appState = 'idle';
         var sourceInfo = null;      // { name, width, height }
         var lastResult = null;      // { blob, name, width, height }
+        var jobSeq = 0;
+        var activeJob = null;
+        var worker = null;
+        var workerAvailable = typeof Worker === 'function';
 
         var ctxOriginal = el.originalCanvas.getContext('2d', { willReadFrequently: true });
         var ctxProcessed = el.processedCanvas.getContext('2d');
@@ -217,6 +230,7 @@
            文件导入
            ==================================================================== */
         function loadFile(file) {
+            cancelActiveJob();
             clearResult();
             setState('loading');
             if (el.dropZone) {
@@ -340,50 +354,148 @@
                 return;
             }
 
-            var startedAt = now();
+            cancelActiveJob();
+            clearResult();
+
+            var job = {
+                id: ++jobSeq,
+                width: w,
+                height: h,
+                rows: 0,
+                reported: -1,
+                labelTs: 0,
+                startedAt: 0,
+                cancelled: false,
+                mode: null
+            };
+            activeJob = job;
+
             hideProcessed();
             setState('processing');
             resetProgress();
             setWaiting(true);
-            setLabel('处理中…');
+            setLabel('准备中…');
             setStatus('busy', '正在修复通道…（' + formatSize(w, h) + '）');
 
+            job.startedAt = now();
+            runJob(job);
+        }
+
+        function runJob(job) {
+            var wk = getWorker();
+            if (!wk) {
+                runOnMainThread(job, null);
+                return;
+            }
+
+            var imageData;
+            try {
+                imageData = ctxOriginal.getImageData(0, 0, job.width, job.height);
+            } catch (err) {
+                failJob(job, '无法读取原图像素：' + describeError(err) + '。图片可能超过浏览器的画布上限。');
+                return;
+            }
+
+            job.mode = 'worker';
+            try {
+                wk.postMessage({
+                    type: 'process',
+                    jobId: job.id,
+                    width: job.width,
+                    height: job.height,
+                    buffer: imageData.data.buffer
+                }, [imageData.data.buffer]);
+            } catch (err) {
+                // 传输失败（例如实现不支持 Transferable）：销毁后台线程并降级
+                workerAvailable = false;
+                destroyWorker();
+                job.mode = 'main';
+                setStatus('busy', '已切换为主线程处理…');
+                runOnMainThread(job, null);
+            }
+        }
+
+        function runOnMainThread(job, imageData) {
+            job.mode = 'main';
+            job.rows = 0;
+            job.reported = -1;
+
+            var w = job.width;
+            var h = job.height;
             var src;
             var dstData;
             try {
-                src = ctxOriginal.getImageData(0, 0, w, h).data;
+                src = (imageData && imageData.data && imageData.data.length)
+                    ? imageData.data
+                    : ctxOriginal.getImageData(0, 0, w, h).data;
                 dstData = ctxProcessed.createImageData(w, h);
             } catch (err) {
-                failJob('无法创建像素缓冲区：' + describeError(err));
+                failJob(job, '无法创建像素缓冲区：' + describeError(err));
                 return;
             }
 
-            try {
-                Algo.processChannels(src, dstData.data, w, h, function (rowsDone, total) {
-                    setWaiting(false);
-                    var pct = total ? Math.round((rowsDone / total) * 100) : 0;
-                    setProgress(pct);
-                    setLabel('处理中… ' + pct + '%');
-                });
-            } catch (err) {
-                failJob('处理过程中出错：' + describeError(err));
-                return;
+            var dst = dstData.data;
+
+            function frame() {
+                if (job.cancelled || activeJob !== job) {
+                    return;
+                }
+                var frameStart = now();
+                try {
+                    while (job.rows < h && (now() - frameStart) < MAIN_BUDGET_MS) {
+                        var end = Math.min(h, job.rows + MAIN_BLOCK_ROWS);
+                        Algo.mapRows(src, dst, w, job.rows, end);
+                        job.rows = end;
+                    }
+                } catch (err) {
+                    failJob(job, '处理过程中出错：' + describeError(err));
+                    return;
+                }
+                reportProgress(job);
+                if (job.rows < h) {
+                    requestAnimationFrame(frame);
+                } else {
+                    finishJob(job, dstData);
+                }
             }
 
-            finishJob(dstData, startedAt);
+            requestAnimationFrame(frame);
         }
 
-        function finishJob(imageData, startedAt) {
+        function reportProgress(job) {
+            if (job.reported === job.rows) {
+                return;
+            }
+            job.reported = job.rows;
+            setWaiting(false);
+
+            var pct = job.height ? Math.round((job.rows / job.height) * 100) : 0;
+            setProgress(pct);
+
+            var nowTs = now();
+            if (pct >= 100 || (nowTs - job.labelTs) > LABEL_THROTTLE_MS) {
+                job.labelTs = nowTs;
+                setLabel('生成中… ' + pct + '%');
+            }
+        }
+
+        function finishJob(job, imageData) {
+            if (job.cancelled || activeJob !== job) {
+                return;
+            }
             try {
-                el.processedCanvas.width = imageData.width;
-                el.processedCanvas.height = imageData.height;
+                if (el.processedCanvas.width !== job.width || el.processedCanvas.height !== job.height) {
+                    el.processedCanvas.width = job.width;
+                    el.processedCanvas.height = job.height;
+                }
                 ctxProcessed.putImageData(imageData, 0, 0);
             } catch (err) {
-                failJob('写入处理结果失败：' + describeError(err));
+                failJob(job, '写入处理结果失败：' + describeError(err));
                 return;
             }
 
-            var elapsed = Math.round(now() - startedAt);
+            activeJob = null;
+            var elapsed = Math.round(now() - job.startedAt);
 
             setWaiting(false);
             setProgress(100);
@@ -392,21 +504,141 @@
                 el.fixedEmpty.hidden = true;
             }
             if (el.fixedRes) {
-                el.fixedRes.textContent = formatSize(imageData.width, imageData.height);
+                el.fixedRes.textContent = formatSize(job.width, job.height);
             }
             setState('done');
             setLabel('耗时 ' + elapsed + ' ms');
-            setStatus('success', '通道修复完成：' + formatSize(imageData.width, imageData.height) + '，耗时 ' + elapsed + ' ms。可下载结果或导入新图片。');
+            setStatus('success', '通道修复完成：' + formatSize(job.width, job.height) + '，耗时 ' + elapsed + ' ms。可下载结果或导入新图片。');
 
-            encodeResult(imageData.width, imageData.height);
+            encodeResult(job.width, job.height);
         }
 
-        function failJob(message) {
+        function failJob(job, message) {
+            if (activeJob === job) {
+                activeJob = null;
+            }
+            job.cancelled = true;
             setWaiting(false);
             setLabel('处理失败');
             hideProcessed();
             setState('error');
             setStatus('error', message + ' 原图仍保留，可重试或更换图片。');
+        }
+
+        function cancelActiveJob() {
+            var job = activeJob;
+            if (!job) {
+                return;
+            }
+            job.cancelled = true;
+            activeJob = null;
+            if (job.mode === 'worker' && worker) {
+                try {
+                    worker.postMessage({ type: 'cancel', jobId: job.id });
+                } catch (err) {
+                    /* 忽略：Worker 可能已不可用 */
+                }
+            }
+        }
+
+        /* ====================================================================
+           执行层：Worker 调度与降级
+           ==================================================================== */
+        function getWorker() {
+            if (!workerAvailable) {
+                return null;
+            }
+            if (worker) {
+                return worker;
+            }
+            try {
+                worker = new Worker('worker.js');
+                worker.addEventListener('message', onWorkerMessage);
+                worker.addEventListener('error', onWorkerError);
+            } catch (err) {
+                workerAvailable = false;
+                worker = null;
+            }
+            return worker;
+        }
+
+        function destroyWorker() {
+            if (!worker) {
+                return;
+            }
+            try {
+                worker.terminate();
+            } catch (err) {
+                /* 忽略 */
+            }
+            worker = null;
+        }
+
+        function onWorkerError(event) {
+            if (event && typeof event.preventDefault === 'function') {
+                event.preventDefault();
+            }
+            var job = activeJob;
+            destroyWorker();
+            workerAvailable = false;
+            if (!job || job.cancelled) {
+                return;
+            }
+            setStatus('warning', '后台线程不可用，已自动切换为主线程处理。');
+            resetProgress();
+            setWaiting(true);
+            setLabel('处理中…');
+            runOnMainThread(job, null);
+        }
+
+        function onWorkerMessage(event) {
+            var data = event.data || {};
+            var job = activeJob;
+            if (!job || data.jobId !== job.id) {
+                return;   // 过期任务的消息一律忽略
+            }
+
+            if (data.type === 'progress') {
+                job.rows = data.rows || 0;
+                reportProgress(job);
+                return;
+            }
+
+            if (data.type === 'done') {
+                var imageData = null;
+                var pixels = null;
+                try {
+                    pixels = new Uint8ClampedArray(data.buffer);
+                    imageData = new ImageData(pixels, job.width, job.height);
+                } catch (err) {
+                    imageData = null;
+                }
+                if (!imageData && pixels) {
+                    try {
+                        imageData = ctxProcessed.createImageData(job.width, job.height);
+                        imageData.data.set(pixels);
+                    } catch (err2) {
+                        failJob(job, '无法构建处理结果：' + describeError(err2));
+                        return;
+                    }
+                }
+                if (!imageData) {
+                    failJob(job, '后台线程返回的数据不可用。');
+                    return;
+                }
+                finishJob(job, imageData);
+                return;
+            }
+
+            if (data.type === 'error') {
+                setStatus('warning', '后台处理失败（' + (data.message || '未知错误') + '），正在改用主线程重试…');
+                workerAvailable = false;
+                destroyWorker();
+                resetProgress();
+                setWaiting(true);
+                setLabel('处理中…');
+                runOnMainThread(job, null);
+            }
         }
 
         /* ====================================================================
@@ -418,6 +650,7 @@
             if (el.fixedRes) {
                 el.fixedRes.textContent = '';
             }
+            syncControls();
         }
 
         function encodeResult(w, h) {
