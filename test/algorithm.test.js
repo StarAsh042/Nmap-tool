@@ -54,6 +54,9 @@ test('exports:公开 API 齐全', () => {
   assert.equal(typeof Algo.mapRows, 'function');
   assert.equal(typeof Algo.processChannels, 'function');
   assert.equal(typeof Algo.inspectChannels, 'function');
+  assert.equal(typeof Algo.extractChannelRows, 'function');
+  assert.equal(typeof Algo.extractChannel, 'function');
+  assert.ok(Array.isArray(Algo.CHANNEL_KEYS));
   assert.equal(typeof Algo.MAX_PIXELS, 'number');
 });
 
@@ -340,4 +343,192 @@ test('端到端:处理是幂等上下文无关的（重复处理会再次翻转�
 
   assert.equal(once[1], 155, '首次处理 G=255-100=155');
   assert.equal(twice[1], 100, '二次处理 G=255-155=100，回到原值');
+});
+
+/* ======================================================================
+   extractChannelRows / extractChannel — 单通道灰度与 RGB 着色预览
+   ====================================================================== */
+
+test('CHANNEL_KEYS:按 R/G/B/A 顺序暴露通道下标', () => {
+  assert.deepEqual(Algo.CHANNEL_KEYS, ['R', 'G', 'B', 'A']);
+});
+
+test('extractChannelRows:灰度模式下取指定通道并置为不透明', () => {
+  const src = new Uint8ClampedArray([10, 20, 30, 40]);
+  const dst = new Uint8ClampedArray(4);
+
+  Algo.extractChannelRows(src, dst, 1, 0, 1, { channel: 'G', mode: 'gray' });
+
+  assert.deepEqual([...dst], [20, 20, 20, 255],
+    'G 通道值 20 应铺满 RGB，alpha 置 255 以免被棋盘格底色干扰');
+});
+
+test('extractChannelRows:A 通道取原始 alpha 值作为灰度', () => {
+  const src = new Uint8ClampedArray([10, 20, 30, 128]);
+  const dst = new Uint8ClampedArray(4);
+
+  Algo.extractChannelRows(src, dst, 1, 0, 1, { channel: 'A', mode: 'gray' });
+
+  assert.deepEqual([...dst], [128, 128, 128, 255]);
+});
+
+test('extractChannelRows:rgb 着色模式下把该通道涂成对应原色', () => {
+  const src = new Uint8ClampedArray([10, 20, 30, 40]);
+
+  const rDst = new Uint8ClampedArray(4);
+  Algo.extractChannelRows(src, rDst, 1, 0, 1, { channel: 'R', mode: 'rgb' });
+  assert.deepEqual([...rDst], [10, 0, 0, 255], 'R 通道应以纯红调呈现');
+
+  const gDst = new Uint8ClampedArray(4);
+  Algo.extractChannelRows(src, gDst, 1, 0, 1, { channel: 'G', mode: 'rgb' });
+  assert.deepEqual([...gDst], [0, 20, 0, 255], 'G 通道应以纯绿调呈现');
+
+  const bDst = new Uint8ClampedArray(4);
+  Algo.extractChannelRows(src, bDst, 1, 0, 1, { channel: 'B', mode: 'rgb' });
+  assert.deepEqual([...bDst], [0, 0, 30, 255], 'B 通道应以纯蓝调呈现');
+});
+
+test('extractChannelRows:rgb 模式下 A 通道退化为灰度', () => {
+  // A 通道没有对应的原色，着色模式对它没有意义，必须回退到灰度而不是涂成红色
+  const src = new Uint8ClampedArray([10, 20, 30, 128]);
+  const dst = new Uint8ClampedArray(4);
+
+  Algo.extractChannelRows(src, dst, 1, 0, 1, { channel: 'A', mode: 'rgb' });
+
+  assert.deepEqual([...dst], [128, 128, 128, 255]);
+});
+
+test('extractChannelRows:非法 channel 抛错而非静默出错', () => {
+  const src = new Uint8ClampedArray(4);
+  const dst = new Uint8ClampedArray(4);
+  // 注意 undefined 不在此列：undefined 表示「未提供」，合法回落到 R 通道。
+  // 但显式的 null 是上游取值失误，必须报错，否则 bug 会被藏进最终画面。
+  for (const bad of ['X', '', null, 2, 'rgb', 'r']) {
+    assert.throws(
+      () => Algo.extractChannelRows(src, dst, 1, 0, 1, { channel: bad }),
+      /channel/i,
+      `channel=${String(bad)} 应抛出可读错误`,
+    );
+  }
+});
+
+test('extractChannelRows:channel 为 undefined 时回落到 R 通道', () => {
+  const src = new Uint8ClampedArray([10, 20, 30, 40]);
+  const dst = new Uint8ClampedArray(4);
+
+  Algo.extractChannelRows(src, dst, 1, 0, 1, { channel: undefined });
+
+  assert.deepEqual([...dst], [10, 10, 10, 255], '未提供 channel 时应取 R');
+});
+
+test('extractChannelRows:非法 mode 抛错', () => {
+  const src = new Uint8ClampedArray(4);
+  const dst = new Uint8ClampedArray(4);
+  assert.throws(
+    () => Algo.extractChannelRows(src, dst, 1, 0, 1, { channel: 'R', mode: 'sepia' }),
+    /mode/i,
+  );
+});
+
+test('extractChannelRows:缺省 options 时回退为 R 通道灰度', () => {
+  const src = new Uint8ClampedArray([10, 20, 30, 40]);
+  const dst = new Uint8ClampedArray(4);
+  assert.doesNotThrow(() => Algo.extractChannelRows(src, dst, 1, 0, 1));
+  assert.deepEqual([...dst], [10, 10, 10, 255]);
+});
+
+test('extractChannelRows:仅处理指定行区间，区间外保持不变', () => {
+  const width = 2;
+  const height = 4;
+  const src = makeImage(width, height, (x, y) => [10 + y, 20 + y, 30 + y, 255]);
+  const dst = new Uint8ClampedArray(width * height * 4).fill(9);
+
+  Algo.extractChannelRows(src, dst, width, 1, 3, { channel: 'B', mode: 'gray' });
+
+  assert.deepEqual(pixelAt(dst, width, 0, 0), [9, 9, 9, 9], '区间外的第 0 行不应被写入');
+  assert.deepEqual(pixelAt(dst, width, 0, 1), [31, 31, 31, 255], '第 1 行 B=30+1=31');
+  assert.deepEqual(pixelAt(dst, width, 0, 2), [32, 32, 32, 255], '第 2 行 B=30+2=32');
+  assert.deepEqual(pixelAt(dst, width, 0, 3), [9, 9, 9, 9], '区间外的末行不应被写入');
+});
+
+test('extractChannelRows:返回结束行且空区间为安全空操作', () => {
+  const src = new Uint8ClampedArray([1, 2, 3, 4]);
+  const dst = new Uint8ClampedArray([9, 9, 9, 9]);
+
+  assert.equal(Algo.extractChannelRows(src, dst, 1, 2, 5, { channel: 'R' }), 5);
+
+  const guard = new Uint8ClampedArray([9, 9, 9, 9]);
+  assert.equal(Algo.extractChannelRows(src, guard, 1, 3, 3, { channel: 'R' }), 3);
+  assert.deepEqual([...guard], [9, 9, 9, 9], 'startRow === endRow 时不应写入任何像素');
+});
+
+test('extractChannelRows:不修改源缓冲', () => {
+  const src = makeImage(3, 3, (x, y) => [x * 10, y * 10, 30, 40]);
+  const copy = new Uint8ClampedArray(src);
+  const dst = new Uint8ClampedArray(src.length);
+
+  Algo.extractChannelRows(src, dst, 3, 0, 3, { channel: 'A', mode: 'gray' });
+
+  assert.deepEqual([...src], [...copy]);
+});
+
+test('extractChannel:整图提取结果与逐行调用一致', () => {
+  const width = 5;
+  const height = 7;
+  const src = makeImage(width, height, (x, y) => [(x * 3) % 256, (y * 5) % 256, 99, (x + y) % 256]);
+
+  const whole = new Uint8ClampedArray(src.length);
+  Algo.extractChannel(src, whole, width, height, { channel: 'G', mode: 'gray' });
+
+  const rowByRow = new Uint8ClampedArray(src.length);
+  for (let y = 0; y < height; y++) {
+    Algo.extractChannelRows(src, rowByRow, width, y, y + 1, { channel: 'G', mode: 'gray' });
+  }
+
+  assert.deepEqual([...whole], [...rowByRow]);
+});
+
+test('extractChannel:返回总行数并上报进度', () => {
+  const width = 4;
+  const height = 600; // > 内部 CHUNK_ROWS，确保多次回调
+  const src = new Uint8ClampedArray(width * height * 4);
+  const dst = new Uint8ClampedArray(width * height * 4);
+
+  const calls = [];
+  const rows = Algo.extractChannel(src, dst, width, height, { channel: 'R' }, (done, total) => {
+    calls.push([done, total]);
+  });
+
+  assert.equal(rows, height);
+  assert.ok(calls.length >= 2, `应多次上报进度，实际 ${calls.length} 次`);
+  for (const [done, total] of calls) {
+    assert.equal(total, height);
+    assert.ok(done > 0 && done <= height);
+  }
+  assert.equal(calls[calls.length - 1][0], height);
+});
+
+test('extractChannel:可省略 onProgress 与 options', () => {
+  const src = new Uint8ClampedArray([1, 2, 3, 4]);
+  const dst = new Uint8ClampedArray(4);
+  assert.doesNotThrow(() => Algo.extractChannel(src, dst, 1, 1));
+});
+
+test('端到端:修复结果各通道提取互不串扰', () => {
+  const width = 1;
+  const height = 1;
+  // 原图 R=10 G=20 B=30 A=40 => 修复后 R=40 G=235 B=10 A=255
+  const src = makeImage(width, height, () => [10, 20, 30, 40]);
+  const fixed = new Uint8ClampedArray(src.length);
+  Algo.processChannels(src, fixed, width, height);
+
+  const dst = new Uint8ClampedArray(4);
+  Algo.extractChannel(fixed, dst, width, height, { channel: 'R', mode: 'gray' });
+  assert.deepEqual([...dst], [40, 40, 40, 255], '修复后 R 应为原 alpha=40');
+
+  Algo.extractChannel(fixed, dst, width, height, { channel: 'G', mode: 'gray' });
+  assert.deepEqual([...dst], [235, 235, 235, 255], '修复后 G 应为 255-20=235');
+
+  Algo.extractChannel(fixed, dst, width, height, { channel: 'A', mode: 'gray' });
+  assert.deepEqual([...dst], [255, 255, 255, 255], '修复后 A 恒为 255，应呈全白');
 });

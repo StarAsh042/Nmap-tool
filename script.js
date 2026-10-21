@@ -25,6 +25,10 @@
     var MAIN_BLOCK_ROWS = 16;
     var MAIN_BUDGET_MS = 10;
 
+    /* 单通道预览的分片参数：粒度比主映射粗，因为预览不需要抢占式响应 */
+    var CHANNEL_BLOCK_ROWS = 64;
+    var CHANNEL_BUDGET_MS = 12;
+
     /* 进度文案的最小更新间隔，避免高频刷新 */
     var LABEL_THROTTLE_MS = 120;
 
@@ -69,6 +73,13 @@
         var dragDepth = 0;
         var lastFocused = null;
         var overlayTimer = null;
+
+        /* 单通道预览状态 */
+        var previewSource = null;   // { canvas, width, height, label }当前预览的来源画布
+        var previewChannel = 'RGB'; // 'RGB' | 'R' | 'G' | 'B' | 'A'
+        var previewMode = 'gray';   // 'gray' | 'rgb'
+        var previewJobId = 0;       // 单调递增，令过期的提取结果自动失效
+        var channelPixels = null;   // 提取结果的像素缓冲，复用避免每次切换都重新分配
 
         var ctxOriginal = el.originalCanvas.getContext('2d', { willReadFrequently: true });
         var ctxProcessed = el.processedCanvas.getContext('2d');
@@ -137,7 +148,9 @@
                 overlayCanvas: byId('overlayCanvas'),
                 overlayTitle: byId('overlayTitle'),
                 overlayMeta: byId('overlayMeta'),
-                overlayClose: byId('overlayClose')
+                overlayClose: byId('overlayClose'),
+                channelSwitch: byId('channelSwitch'),
+                channelHint: byId('channelHint')
             };
         }
 
@@ -186,6 +199,9 @@
 
             if (el.overlayClose) {
                 el.overlayClose.addEventListener('click', closePreview);
+            }
+            if (el.channelSwitch) {
+                el.channelSwitch.addEventListener('click', onChannelSwitchClick);
             }
             if (el.overlay) {
                 el.overlay.addEventListener('click', function (event) {
@@ -1121,22 +1137,24 @@
                 clearTimeout(overlayTimer);
                 overlayTimer = null;
             }
-            try {
-                el.overlayCanvas.width = sourceCanvas.width;
-                el.overlayCanvas.height = sourceCanvas.height;
-                ctxOverlay.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
-                ctxOverlay.drawImage(sourceCanvas, 0, 0);
-            } catch (err) {
-                setStatus('error', '无法放大预览：' + describeError(err));
-                return;
-            }
+
+            // 每次打开都从合成视图起步：上次的单通道选择属于上一次会话
+            previewChannel = 'RGB';
+            previewMode = 'gray';
+            previewSource = {
+                canvas: sourceCanvas,
+                width: sourceCanvas.width,
+                height: sourceCanvas.height,
+                label: sourceCanvas === el.originalCanvas ? '原图' : '修复结果'
+            };
 
             if (el.overlayTitle) {
-                el.overlayTitle.textContent = sourceCanvas === el.originalCanvas ? '原图 · 原尺寸预览' : '修复结果 · 原尺寸预览';
+                el.overlayTitle.textContent = previewSource.label + ' · 原尺寸预览';
             }
             if (el.overlayMeta) {
-                el.overlayMeta.textContent = formatSize(sourceCanvas.width, sourceCanvas.height);
+                el.overlayMeta.textContent = formatSize(previewSource.width, previewSource.height);
             }
+            syncChannelButtons();
 
             lastFocused = document.activeElement;
             el.overlay.hidden = false;
@@ -1148,12 +1166,15 @@
             if (el.overlayClose) {
                 el.overlayClose.focus();
             }
+
+            renderPreview();
         }
 
         function closePreview() {
             if (!el.overlay || el.overlay.hidden) {
                 return;
             }
+            resetChannelViewer();
             el.overlay.classList.remove('is-open');
             if (overlayTimer) {
                 clearTimeout(overlayTimer);
@@ -1172,6 +1193,188 @@
                 lastFocused.focus();
             }
             lastFocused = null;
+        }
+
+        /* ====================================================================
+           单通道预览
+           ==================================================================== */
+        function onChannelSwitchClick(event) {
+            var btn = event.target && event.target.closest
+                ? event.target.closest('button[data-channel], button[data-mode]')
+                : null;
+            if (!btn || !el.channelSwitch.contains(btn)) {
+                return;
+            }
+            if (previewChannel === 'RGB' && btn.dataset.mode === 'rgb') {
+                // RGB 着色模式只对单通道有意义，合成视图下无效果可看
+                setChannelHint('RGB 着色仅在选择单个通道时生效', '');
+                return;
+            }
+
+            var changed = false;
+            if (btn.dataset.channel) {
+                changed = btn.dataset.channel !== previewChannel;
+                previewChannel = btn.dataset.channel;
+            }
+            if (btn.dataset.mode) {
+                changed = btn.dataset.mode !== previewMode || changed;
+                previewMode = btn.dataset.mode;
+            }
+            if (!changed) {
+                return;
+            }
+            syncChannelButtons();
+            renderPreview();
+        }
+
+        function syncChannelButtons() {
+            if (!el.channelSwitch) {
+                return;
+            }
+            var btns = el.channelSwitch.querySelectorAll('button[data-channel]');
+            for (var i = 0; i < btns.length; i++) {
+                var active = btns[i].dataset.channel === previewChannel;
+                btns[i].classList.toggle('is-active', active);
+                btns[i].setAttribute('aria-pressed', active ? 'true' : 'false');
+            }
+            var modeBtns = el.channelSwitch.querySelectorAll('button[data-mode]');
+            for (var j = 0; j < modeBtns.length; j++) {
+                var modeActive = modeBtns[j].dataset.mode === previewMode;
+                modeBtns[j].classList.toggle('is-active', modeActive);
+                modeBtns[j].setAttribute('aria-pressed', modeActive ? 'true' : 'false');
+            }
+        }
+
+        function setChannelHint(text, level) {
+            if (!el.channelHint) {
+                return;
+            }
+            el.channelHint.textContent = text || '';
+            el.channelHint.className = 'channel-hint'
+                + (level ? ' is-' + level : '');
+        }
+
+        /**
+         * 复位预览状态并释放通道缓冲。
+         *
+         * 通道提取会为整图额外分配一份与画布同尺寸的像素缓冲（8K 图约 128MB），
+         * 关闭浮层后必须显式断开引用，否则会被 GC 拖到下一次大图导入才回收。
+         */
+        function resetChannelViewer() {
+            previewJobId++;
+            previewSource = null;
+            channelPixels = null;
+            previewChannel = 'RGB';
+            previewMode = 'gray';
+            setChannelHint('', '');
+        }
+
+        /**
+         * 按当前 previewChannel / previewMode 重绘浮层画布。
+         *
+         * 合成视图直接 drawImage 源画布，不触碰像素；
+         * 单通道视图才读取像素并交给算法层提取——大图下这是唯一有成本的分支，
+         * 因此做成按需触发而非与主流程绑定。
+         */
+        function renderPreview() {
+            if (!previewSource || !ctxOverlay || !el.overlayCanvas) {
+                return;
+            }
+            var src = previewSource;
+            var w = src.width;
+            var h = src.height;
+
+            try {
+                el.overlayCanvas.width = w;
+                el.overlayCanvas.height = h;
+                ctxOverlay.clearRect(0, 0, w, h);
+            } catch (err) {
+                setChannelHint('无法预览该尺寸的图像', 'error');
+                return;
+            }
+
+            if (previewChannel === 'RGB') {
+                try {
+                    ctxOverlay.drawImage(src.canvas, 0, 0);
+                } catch (err) {
+                    setChannelHint('无法放大预览：' + describeError(err), 'error');
+                    return;
+                }
+                setChannelHint('合成视图 · 通道值以彩色呈现', '');
+                return;
+            }
+
+            renderSingleChannel(src, w, h);
+        }
+
+        function renderSingleChannel(src, w, h) {
+            var jobId = ++previewJobId;
+            var startedAt = now();
+
+            // 必须先把源图画进 overlay 再回读：renderPreview 已清空过画布，
+            // 直接 getImageData 拿到的是全透明黑，读不出任何通道信息。
+            try {
+                ctxOverlay.drawImage(src.canvas, 0, 0);
+            } catch (err) {
+                setChannelHint('无法读取 ' + previewChannel + ' 通道：' + describeError(err), 'error');
+                return;
+            }
+
+            var pixels;
+            try {
+                pixels = ctxOverlay.getImageData(0, 0, w, h);
+            } catch (err) {
+                setChannelHint('无法读取像素：' + describeError(err), 'error');
+                return;
+            }
+
+            var target = channelPixels;
+            if (!target || target.width !== w || target.height !== h) {
+                try {
+                    target = ctxOverlay.createImageData(w, h);
+                } catch (err) {
+                    setChannelHint('无法创建像素缓冲区：' + describeError(err), 'error');
+                    return;
+                }
+                channelPixels = target;
+            }
+
+            setChannelHint('正在提取 ' + previewChannel + ' 通道…', 'busy');
+
+            var options = { channel: previewChannel, mode: previewMode };
+            var row = 0;
+
+            function frame() {
+                if (jobId !== previewJobId) {
+                    return;   // 浮层已关闭或用户已切到别的通道，结果作废
+                }
+                var start = now();
+                try {
+                    while (row < h && (now() - start) < CHANNEL_BUDGET_MS) {
+                        var end = Math.min(h, row + CHANNEL_BLOCK_ROWS);
+                        Algo.extractChannelRows(pixels.data, target.data, w, row, end, options);
+                        row = end;
+                    }
+                    if (row < h) {
+                        requestAnimationFrame(frame);
+                        return;
+                    }
+                    ctxOverlay.putImageData(target, 0, 0);
+                } catch (err) {
+                    setChannelHint('提取 ' + previewChannel + ' 通道失败：' + describeError(err), 'error');
+                    return;
+                }
+
+                var elapsed = Math.round(now() - startedAt);
+                setChannelHint(
+                    previewChannel + ' 通道 · '
+                    + (previewMode === 'rgb' ? 'RGB 着色' : '灰度')
+                    + ' · 耗时 ' + elapsed + ' ms',
+                    ''
+                );
+            }
+
+            frame();
         }
 
         /* ====================================================================

@@ -964,6 +964,97 @@ canvas {
 }
 
 /* --------------------------------------------------------------------------
+   9.1 单通道预览切换条
+   -------------------------------------------------------------------------- */
+.channel-viewer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.channel-group {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-md);
+    background-color: var(--bg-primary);
+}
+
+.channel-btn,
+.mode-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: calc(var(--radius-md) - 4px);
+    font-family: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out);
+}
+
+.channel-btn:hover,
+.mode-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-tertiary);
+}
+
+.channel-btn.is-active,
+.mode-btn.is-active {
+    color: var(--text-primary);
+    border-color: var(--accent-color);
+    background-color: rgba(59, 130, 246, 0.18);
+}
+
+.channel-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    border: 1px solid rgba(248, 250, 252, 0.25);
+}
+
+.channel-swatch.is-rgb {
+    background: linear-gradient(135deg, #ef4444 0%, #22c55e 50%, #3b82f6 100%);
+}
+
+.channel-swatch.is-r {
+    background: #ef4444;
+}
+
+.channel-swatch.is-g {
+    background: #22c55e;
+}
+
+.channel-swatch.is-b {
+    background: #3b82f6;
+}
+
+.channel-swatch.is-a {
+    background: #f8fafc;
+}
+
+.channel-hint {
+    font-size: 0.78rem;
+    color: var(--text-tertiary);
+}
+
+.channel-hint.is-busy {
+    color: var(--accent-soft);
+}
+
+.channel-hint.is-error {
+    color: #f87171;
+}
+
+/* --------------------------------------------------------------------------
    10. 动效
    -------------------------------------------------------------------------- */
 @keyframes fade-up {

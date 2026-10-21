@@ -116,6 +116,35 @@
                     </svg>
                 </button>
             </div>
+            <div class="channel-viewer" id="channelSwitch" role="group" aria-label="单通道预览">
+                <div class="channel-group" role="group" aria-label="选择通道">
+                    <button class="channel-btn is-active" type="button" data-channel="RGB" aria-pressed="true">
+                        <span class="channel-swatch is-rgb" aria-hidden="true"></span>
+                        <span class="channel-name">合成</span>
+                    </button>
+                    <button class="channel-btn" type="button" data-channel="R" aria-pressed="false">
+                        <span class="channel-swatch is-r" aria-hidden="true"></span>
+                        <span class="channel-name">R</span>
+                    </button>
+                    <button class="channel-btn" type="button" data-channel="G" aria-pressed="false">
+                        <span class="channel-swatch is-g" aria-hidden="true"></span>
+                        <span class="channel-name">G</span>
+                    </button>
+                    <button class="channel-btn" type="button" data-channel="B" aria-pressed="false">
+                        <span class="channel-swatch is-b" aria-hidden="true"></span>
+                        <span class="channel-name">B</span>
+                    </button>
+                    <button class="channel-btn" type="button" data-channel="A" aria-pressed="false">
+                        <span class="channel-swatch is-a" aria-hidden="true"></span>
+                        <span class="channel-name">A</span>
+                    </button>
+                </div>
+                <div class="channel-group" role="group" aria-label="选择显示模式">
+                    <button class="mode-btn is-active" type="button" data-mode="gray" aria-pressed="true">灰度</button>
+                    <button class="mode-btn" type="button" data-mode="rgb" aria-pressed="false">RGB 着色</button>
+                </div>
+                <span class="channel-hint" id="channelHint" role="status" aria-live="polite"></span>
+            </div>
             <div class="overlay-body">
                 <canvas id="overlayCanvas"></canvas>
             </div>

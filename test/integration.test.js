@@ -296,3 +296,64 @@ test('结构:algorithm.js 同时兼容经典脚本与 CommonJS', () => {
   assert.match(algo, /typeof self\s*!==\s*['"]undefined['"]\s*\?\s*self\s*:\s*this/,
     '应以 (typeof self !== "undefined" ? self : this) 兼容两种环境');
 });
+
+/* ======================================================================
+   结构层：单通道预览（channel viewer）
+   ====================================================================== */
+
+test('结构:index.html 提供 RGBA 单通道切换条', () => {
+  const html = read('index.html');
+  assert.match(html, /id=["']channelSwitch["']/, '浮层内应有通道切换条容器');
+  // 合成视图 + R/G/B/A 四个通道，共 5 个可切换目标
+  for (const key of ['RGB', 'R', 'G', 'B', 'A']) {
+    assert.ok(
+      html.includes(`data-channel="${key}"`),
+      `通道切换条应包含 data-channel="${key}" 按钮`,
+    );
+  }
+});
+
+test('结构:通道切换条提供灰度与 RGB 着色两种显示模式', () => {
+  const html = read('index.html');
+  assert.match(html, /data-mode=["']gray["']/, '应提供灰度模式按钮');
+  assert.match(html, /data-mode=["']rgb["']/, '应提供 RGB 着色模式按钮');
+});
+
+test('结构:切换条按钮具备无障碍语义', () => {
+  const html = read('index.html');
+  const group = html.slice(html.indexOf('id="channelSwitch"'));
+  assert.match(group, /role=["']group["']/, '切换条应声明 role=group');
+  assert.match(group, /aria-label=["'][^"']+["']/, '切换条应有 aria-label');
+  assert.match(group, /aria-pressed|aria-selected/, '切换按钮应暴露选中状态');
+});
+
+test('结构:script.js 绑定通道切换条并在浮层关闭时复位', () => {
+  const script = read('script.js');
+  assert.match(script, /channelSwitch/, 'script.js 应收集通道切换条元素');
+  assert.match(script, /data-channel/, 'script.js 应按 data-channel 分发切换');
+  assert.match(script, /data-mode/, 'script.js 应按 data-mode 切换显示模式');
+  // 浮层复用同一个画布，关闭时必须把尺寸归零释放内存；新增的通道缓冲同理
+  assert.match(script, /resetChannelViewer|clearChannelCache/,
+    'script.js 应提供复位/释放通道缓存的函数');
+});
+
+test('结构:script.js 不重复实现通道提取算法', () => {
+  const script = read('script.js');
+  const code = script
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[^\S\n]*\/\/.*$/gm, '');
+
+  assert.match(code, /extractChannelRows|extractChannel/,
+    'script.js 应调用算法层提供的通道提取函数');
+  assert.doesNotMatch(code, /dst\s*\[\s*i\s*\+\s*1\s*\]\s*=/,
+    'script.js 不应自行逐像素写灰度，应交给 algorithm.js');
+});
+
+test('结构:algorithm.js 不因通道提取而引入 DOM 依赖', () => {
+  const code = read('algorithm.js')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[^\S\n]*\/\/.*$/gm, '');
+
+  assert.doesNotMatch(code, /\bdocument\./, 'algorithm.js 不应访问 document');
+  assert.doesNotMatch(code, /\bwindow\./, 'algorithm.js 不应访问 window');
+});
