@@ -1,30 +1,138 @@
 name: CI
 
+# 触发：PR 与 push 到 main/dev。不使用 paths 过滤——required check 一旦被路径过滤，
+# 只改文档的 PR 会永久卡在 "Expected — Waiting for status to be reported"。
+# 成本控制靠 job 本身的耗时（全部加起来约 1 分钟），不靠跳过。
 on:
-  push:
-    branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
-    # job 名与分支保护中登记的状态检查名一致，改名会导致 PR 卡在 BLOCKED
-    name: 语法检查与单元测试
-    runs-on: ubuntu-latest
+  unit:
+    name: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
 
-      # 与 package.json 的 engines.node 保持一致
+      # 版本与 package.json 的 engines.node 一致（>=22）
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
 
-      # 零运行时依赖，无 lockfile，无需 npm ci
+      # 零运行时依赖，无 lockfile，因此没有 npm ci 这一步
 
-      - run: npm test
+      - name: 单元测试与集成测试
+        run: npm test
 
-      - run: npm run smoke
+      - name: 冒烟检查
+        run: npm run smoke
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 工具链版本由 rust-toolchain.toml 固定，wasm32 目标自动安装。
+      # 不锁版本的话，CI 编译出的产物必然与入库产物不同，
+      # 下面「产物与源码一致」会永远报警。
+      - name: 工具链版本
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+
+      - name: 解码器单元测试
+        run: cargo test --locked --manifest-path crates/texture-decoder/Cargo.toml
+
+      - name: 重建 wasm 产物
+        run: node scripts/build-wasm.mjs
+
+      # 改了 Rust 却忘了重新编译，产物就会和源码脱节：
+      # 测试全绿，线上跑的却还是旧逻辑。
+      #
+      # 比对的是「源码指纹」而不是 wasm 字节。原因：同一份源码在 Windows 与
+      # Linux 上编译出的 wasm 并不逐字节相同（实测 77946 vs 77914 字节），
+      # 比字节会让本检查永远报警。指纹跨平台稳定（换行符已归一化），
+      # 同样能抓住「改了源码没重编」这个真正要防的问题。
+      - name: 校验产物与源码一致
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code --stat -- vendor/texture-decoder.source.sha256; then
+            echo ""
+            echo "::error::Rust 源码已变更但 wasm 产物未重新编译，请运行 npm run build:wasm 并提交 vendor/"
+            exit 1
+          fi
+          echo "产物与源码一致"
+
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      # gitleaks 需要完整历史才能判断提交里是否引入过密钥
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Rust 依赖漏洞扫描
+        uses: rustsec/audit-check@858dc40f52ca2b8570b7a997c1c4e35c6fc9a432
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: crates/texture-decoder
+
+      # 前端零运行时依赖，npm audit 无对象可扫。
+      # 这里断言这个前提本身：将来引入依赖时该断言会失败，
+      # 提醒把 npm audit 接进来，而不是让安全扫描静默失效。
+      - name: 确认前端仍为零运行时依赖
+        run: |
+          set -euo pipefail
+          node -e "
+            const pkg = require('./package.json');
+            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+            const names = Object.keys(deps);
+            if (names.length > 0) {
+              console.error('检测到依赖：' + names.join(', '));
+              console.error('本项目此前为零运行时依赖，npm audit 未接入。');
+              console.error('新增依赖时必须同时在 security job 里加上 npm audit。');
+              process.exit(1);
+            }
+            console.log('零运行时依赖，npm audit 不适用');
+          "
+
+      - name: 密钥扫描
+        uses: gitleaks/gitleaks-action@bcfb9cce635345aac9996cedc19b2de8e01b894f
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 唯一 required check。矩阵或重构导致 job 改名时，分支保护只需同步这一个名字。
+  # 任何非 success（failure / skipped / cancelled / neutral）都判失败。
+  ci:
+    name: ci
+    if: always()
+    needs: [unit, wasm, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require all jobs
+        run: |
+          set -euo pipefail
+          test "${{ needs.unit.result }}" = "success"
+          test "${{ needs.wasm.result }}" = "success"
+          test "${{ needs.security.result }}" = "success"
